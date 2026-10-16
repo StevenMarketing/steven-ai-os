@@ -1,0 +1,84 @@
+#!/usr/bin/env sh
+# Steven AI OS — last line of defence before anything leaves this machine.
+#
+# Order matters: the diff is verified FIRST (fail-closed), then the ref rules.
+#
+# 1. scripts/issue_guard.py verify-diff over the final diff vs the base branch:
+#    refuses a real credential (never bypassable) or a protected path
+#    (owner bypass: HERMES_ALLOW_PROTECTED=1).
+# 2. Refuses a ref update that would:
+#      a. write to main or master (the worker must always use a branch + PR), or
+#      b. delete a remote branch, or
+#      c. be a non-fast-forward (force) update.
+#
+# Deliberate bypass for a human doing maintenance:
+#     HERMES_ALLOW_MAIN_PUSH=1 git push origin main
+
+set -u
+
+ALLOW_MAIN="${HERMES_ALLOW_MAIN_PUSH:-0}"
+ALLOW_PROTECTED="${HERMES_ALLOW_PROTECTED:-0}"
+ZERO="0000000000000000000000000000000000000000"
+blocked=0
+
+# ---- 1. mandatory diff gate (fail-closed) --------------------------------
+ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || ROOT=""
+if [ -n "$ROOT" ] && [ -f "$ROOT/scripts/issue_guard.py" ]; then
+    PY="${PYTHON:-}"
+    if [ -z "$PY" ] || [ ! -x "$PY" ]; then
+        if [ -x /opt/hermes/.venv/bin/python ]; then
+            PY=/opt/hermes/.venv/bin/python
+        else
+            PY=python3
+        fi
+    fi
+    BASE="${HERMES_DIFF_BASE:-origin/main}"
+    if ! "$PY" "$ROOT/scripts/issue_guard.py" verify-diff \
+            --base "$BASE" --root "$ROOT" >/dev/null 2>&1; then
+        # Show the real reason on stderr, then decide.
+        "$PY" "$ROOT/scripts/issue_guard.py" verify-diff \
+            --base "$BASE" --root "$ROOT" >&2 || true
+        if [ "$ALLOW_PROTECTED" = "1" ] && ! "$PY" "$ROOT/scripts/issue_guard.py" \
+                verify-diff --base "$BASE" --root "$ROOT" 2>&1 \
+                | grep -q "credential-shaped value"; then
+            printf '%s\n' "hermes-guard: protected-path bypass in use" \
+                "  (HERMES_ALLOW_PROTECTED=1 - owner maintenance only)" >&2
+        else
+            printf '%s\n' "hermes-guard: REFUSING to push - the diff gate failed." \
+                "  A credential finding can never be bypassed." >&2
+            exit 1
+        fi
+    fi
+fi
+
+# ---- 2. ref rules --------------------------------------------------------
+while read -r local_ref local_sha remote_ref remote_sha; do
+    [ -n "${remote_ref:-}" ] || continue
+
+    case "$remote_ref" in
+        refs/heads/main|refs/heads/master)
+            if [ "$ALLOW_MAIN" != "1" ]; then
+                printf '%s\n' "hermes-guard: REFUSING to push to $remote_ref." \
+                    "  Automation must open a branch and a pull request." \
+                    "  If you are the owner doing maintenance: HERMES_ALLOW_MAIN_PUSH=1 git push ..." >&2
+                blocked=1
+            fi
+            ;;
+    esac
+
+    if [ "$local_sha" = "$ZERO" ]; then
+        printf '%s\n' "hermes-guard: REFUSING to delete $remote_ref." >&2
+        blocked=1
+        continue
+    fi
+
+    if [ "$remote_sha" != "$ZERO" ]; then
+        if ! git merge-base --is-ancestor "$remote_sha" "$local_sha" 2>/dev/null; then
+            printf '%s\n' "hermes-guard: REFUSING non-fast-forward (force) update of $remote_ref." >&2
+            blocked=1
+        fi
+    fi
+done
+
+[ "$blocked" -eq 0 ] || exit 1
+exit 0
