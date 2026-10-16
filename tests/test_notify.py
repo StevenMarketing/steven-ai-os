@@ -267,5 +267,20 @@ class NotifyProfileTests(unittest.TestCase):
         self.assertEqual(notify._hermes_cmd("x"), ["hermes", "send", "x"])
 
 
+class TimezoneDisplayTests(unittest.TestCase):
+    """Mọi thông báo hiển thị theo GMT+7; mốc reset ngân sách vẫn ghi UTC."""
+
+    def test_every_message_carries_a_gmt7_stamp(self):
+        for event in ("task_done", "task_failed", "task_blocked", "budget", "worker_error"):
+            msg = notify.build_message(event, issue=1, spend=1.0, cap=4.0, detail="d")
+            self.assertIn("GMT+7", msg, event)
+
+    def test_the_stamp_is_seven_hours_ahead_of_utc(self):
+        import time as _t
+        stamp = 0.0                       # 1970-01-01 00:00 UTC
+        self.assertIn("07:00", notify._stamp_gmt7(stamp))
+        self.assertTrue(notify._stamp_gmt7(stamp).startswith("🕒 1970-01-01"))
+
+
 if __name__ == "__main__":
     unittest.main()
