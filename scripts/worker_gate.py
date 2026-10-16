@@ -76,10 +76,15 @@ class Gate:
 
     def __init__(self, state_dir: Optional[str] = None,
                  budget_dir: Optional[str] = None,
-                 now: Optional[float] = None) -> None:
+                 now: Optional[float] = None,
+                 ack_file: Optional[str] = None) -> None:
         self.state_path = self._resolve_state_path(state_dir)
         self.state = lib.StateStore(self.state_path)
         self.budget_dir = budget_dir or budget.default_state_dir()
+        # File ngoại lệ legacy: nằm trong repo (versioned) nên được review như code.
+        self.ack_file = (ack_file or os.environ.get("STEVEN_LEGACY_ACK_FILE")
+                         or os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                         "legacy_unsettled.json"))
         self.now = now
 
     # -- lớp ngân sách -----------------------------------------------------
@@ -136,12 +141,30 @@ class Gate:
 
     def finish(self, issue: Any, outcome: str, cost: float = 0.0,
                pr: Optional[str] = None, note: str = "", tests: Optional[str] = None,
-               notify: bool = True, detail: Optional[str] = None) -> Dict[str, Any]:
+               notify: bool = True, detail: Optional[str] = None,
+               force: bool = False) -> Dict[str, Any]:
         if outcome not in OUTCOME_EVENT:
             raise SystemExit(f"kết cục không hợp lệ: {outcome!r} "
                              f"(dùng: {', '.join(sorted(OUTCOME_EVENT))})")
         guard = self.guard()
         task = task_key(issue)
+        # IDEMPOTENCY: một issue đã đóng thì không được ghi chi phí lần hai, không được
+        # gửi tin thứ hai. Đường bình thường đã bị chặn từ `can_start` (issue đã
+        # `processed`), nhưng một lời gọi finish **thủ công** vẫn lọt trước bản vá này.
+        self.state = lib.StateStore(self.state_path)
+        if self.state.is_processed(issue) and not force:
+            settled = (self.state.data.get("processed") or {}).get(str(issue)) or {}
+            return {
+                "issue": issue, "outcome": outcome, "already_settled": True,
+                "settled_as": settled.get("outcome"),
+                "settled_pr": settled.get("pr"),
+                "settled_at": settled.get("finished_at"),
+                "cost_recorded_usd": 0.0,
+                "hold_released_usd": 0.0,
+                "attempts": guard.attempts(task),
+                "notified": {"ok": True,
+                             "skipped": "already settled: no duplicate message, no cost"},
+            }
         freed = guard.release(task)                       # nhả chỗ đã giữ (nếu còn)
         recorded = guard.record(task, cost, note=note or f"outcome={outcome}",
                                 kind="attempt")
@@ -174,7 +197,8 @@ class Gate:
             import notify as notify_mod
             text = notify_mod.build_message(event, issue=issue, pr=pr, tests=tests,
                                             detail=detail)
-            return notify_mod.send(text)
+            return notify_mod.send(text, state_dir=self.budget_dir,
+                                   label=f"outcome-{issue}-{outcome}", event=event)
         except Exception as exc:                          # noqa: BLE001
             return {"ok": False, "error": type(exc).__name__}
 
@@ -234,14 +258,33 @@ class Gate:
             processed[str(issue)] = {"outcome": info.get("outcome"), "pr": info.get("pr"),
                                      "finished_at": finished}
         missing = sorted(i for i in processed if task_key(i) not in settled)
+        # Ngoại lệ legacy có version: chỉ những id được **chủ repo xác nhận** trong
+        # `legacy_unsettled.json` mới được coi là đã biết. Task MỚI thiếu settlement
+        # KHÔNG bao giờ được miễn — nếu không, cảnh báo sẽ mất giá trị.
+        acked = self.acknowledged_legacy()
+        acknowledged = {i: acked[i] for i in missing if i in acked}
+        still_missing = [i for i in missing if i not in acked]
         return {"day": target_day,
                 "processed_today": processed,
                 "settled_tasks": {k: v for k, v in sorted(settled.items())},
-                "missing_settlement": missing,
-                "ok": not missing,
-                "note": ("ok=False nghĩa là một issue đã đóng mà không đi qua cổng ngân sách: "
-                         "kiểm tra ngay, đừng chỉ dựa vào runbook."),
+                "missing_settlement": still_missing,
+                "acknowledged_legacy": acknowledged,
+                "ack_file": self.ack_file,
+                "ok": not still_missing,
+                "note": ("ok=False nghĩa là một issue MỚI đã đóng mà không đi qua cổng ngân "
+                         "sách: kiểm tra ngay, đừng chỉ dựa vào runbook. Issue trong "
+                         "acknowledged_legacy là ngoại lệ đã được chủ repo xác nhận và vẫn "
+                         "được liệt kê, không bị xoá khỏi lịch sử."),
                 }
+
+    def acknowledged_legacy(self) -> Dict[str, Any]:
+        """Đọc file ngoại lệ đã xác nhận (versioned, nằm trong repo để review được)."""
+        try:
+            with open(self.ack_file, "r", encoding="utf-8") as handle:
+                data = json.load(handle)
+        except (OSError, ValueError):
+            return {}
+        return {str(k): v for k, v in (data or {}).items()}
 
     def report(self, provider: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         guard = self.guard()
@@ -285,6 +328,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     p.add_argument("--detail")
     p.add_argument("--note", default="")
     p.add_argument("--no-notify", action="store_true")
+    p.add_argument("--force", action="store_true",
+                   help="ghi lại dù issue đã đóng (chỉ dùng khi cố ý; mặc định từ chối)")
 
     p = sub.add_parser("attempts", help="số lần đã thử và trần retry")
     p.add_argument("--issue", required=True)
@@ -306,7 +351,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     elif args.command == "finish":
         out = gate.finish(args.issue, args.outcome, args.cost, pr=args.pr,
                           note=args.note, tests=args.tests, notify=not args.no_notify,
-                          detail=args.detail)
+                          detail=args.detail, force=args.force)
     elif args.command == "attempts":
         out = gate.attempts(args.issue)
     elif args.command == "audit":

@@ -6,6 +6,7 @@ không có việc, mốc 80%/100% chỉ gửi một lần mỗi ngày, lỗi g�
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 import tempfile
@@ -14,6 +15,11 @@ import unittest
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, os.path.join(ROOT, "scripts"))
+
+# Cô lập sổ gửi cho TOÀN BỘ phiên test (xem tests/test_worker_integration.py).
+os.environ.setdefault("STEVEN_NOTIFY_LEDGER_FILE",
+                      os.path.join(tempfile.mkdtemp(prefix="notify-ledger-"),
+                                   "notify-delivery.jsonl"))
 
 import budget      # noqa: E402
 import notify      # noqa: E402
@@ -163,6 +169,86 @@ class ThresholdTests(unittest.TestCase):
         self.assertEqual(len(sent), 1)
         self.assertIn("80%", sent[0])
         self.assertIn("budget-80", notify.notified_today(self.dir)["sent"])
+
+
+class DeliveryLedgerTests(unittest.TestCase):
+    """Mục 6: sổ ghi kết quả gửi để phát hiện lỗi gửi và gửi trùng (không lưu nội dung)."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="notify-led-")
+        # Cô lập tuyệt đối: mỗi test một sổ riêng, không bao giờ chạm sổ vận hành thật.
+        self.ledger = os.path.join(self.dir, "notify-delivery.jsonl")
+        self._previous = os.environ.get("STEVEN_NOTIFY_LEDGER_FILE")
+        os.environ["STEVEN_NOTIFY_LEDGER_FILE"] = self.ledger
+
+        def restore():
+            if self._previous is None:
+                os.environ.pop("STEVEN_NOTIFY_LEDGER_FILE", None)
+            else:
+                os.environ["STEVEN_NOTIFY_LEDGER_FILE"] = self._previous
+        self.addCleanup(restore)
+
+    def _row(self):
+        path = getattr(self, "ledger", None) or notify.delivery_log_path(self.dir)
+        with open(path, encoding="utf-8") as handle:
+            return [json.loads(line) for line in handle if line.strip()]
+
+    def test_a_successful_send_is_recorded_without_the_body(self):
+        notify.send("nội dung mật abc", state_dir=self.dir,
+                    runner=lambda args: {"ok": True, "returncode": 0},
+                    label="outcome-7-done", event="task_done")
+        rows = self._row()
+        self.assertEqual(len(rows), 1)
+        self.assertTrue(rows[0]["ok"])
+        self.assertEqual(rows[0]["label"], "outcome-7-done")
+        self.assertEqual(rows[0]["event"], "task_done")
+        self.assertEqual(rows[0]["chars"], len("nội dung mật abc"))
+        with open(notify.delivery_log_path(self.dir), encoding="utf-8") as handle:
+            raw = handle.read()
+        self.assertNotIn("nội dung mật abc", raw)          # chỉ lưu băm + độ dài
+
+    def test_a_failed_send_is_recorded_and_reported(self):
+        notify.send("x", state_dir=self.dir,
+                    runner=lambda args: {"ok": False, "returncode": 2})
+        report = notify.audit_deliveries(self.dir)
+        self.assertEqual(report["sent"], 1)
+        self.assertEqual(len(report["failures"]), 1)
+        self.assertEqual(report["failures"][0]["returncode"], 2)
+        self.assertFalse(report["ok"])
+
+    def test_the_same_body_sent_twice_in_a_day_is_flagged(self):
+        runner = lambda args: {"ok": True}
+        notify.send("tin giống nhau", state_dir=self.dir, runner=runner)
+        notify.send("tin giống nhau", state_dir=self.dir, runner=runner)
+        report = notify.audit_deliveries(self.dir)
+        self.assertEqual(report["sent"], 2)
+        self.assertEqual(list(report["duplicate_hashes"].values()), [2])
+        self.assertFalse(report["ok"])
+
+    def test_two_different_messages_are_not_flagged(self):
+        runner = lambda args: {"ok": True}
+        notify.send("tin A", state_dir=self.dir, runner=runner)
+        notify.send("tin B", state_dir=self.dir, runner=runner)
+        report = notify.audit_deliveries(self.dir)
+        self.assertEqual(report["duplicate_hashes"], {})
+        self.assertTrue(report["ok"])
+
+    def test_a_dry_run_is_not_recorded(self):
+        notify.send("không gửi", dry_run=True, state_dir=self.dir)
+        self.assertFalse(os.path.exists(notify.delivery_log_path(self.dir)))
+
+    def test_main_audit_deliveries_reports_clean(self):
+        code = notify.main(["--audit-deliveries", "--state-dir", self.dir, "--json"])
+        self.assertEqual(code, 0)
+
+    def test_the_ledger_path_can_be_isolated_from_the_operational_one(self):
+        """Sổ vận hành không bao giờ bị test làm nhiễu: đặt biến môi trường là đủ."""
+        self.assertEqual(notify.delivery_log_path(), self.ledger)
+        notify.send("tin trong test", state_dir=self.dir,
+                    runner=lambda args: {"ok": True})
+        self.assertEqual(len(self._row()), 1)
+        self.assertNotEqual(notify.delivery_log_path(),
+                            os.path.join(budget.default_state_dir(), "notify-delivery.jsonl"))
 
 
 if __name__ == "__main__":

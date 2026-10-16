@@ -21,6 +21,12 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, os.path.join(ROOT, "scripts"))
 
+# Cô lập sổ gửi cho TOÀN BỘ phiên test: không đường gọi nào (kể cả đường không truyền
+# state_dir) được chạm vào sổ vận hành thật.
+os.environ.setdefault("STEVEN_NOTIFY_LEDGER_FILE",
+                      os.path.join(tempfile.mkdtemp(prefix="notify-ledger-"),
+                                   "notify-delivery.jsonl"))
+
 import budget                 # noqa: E402
 import budget_watchdog        # noqa: E402
 import issue_worker_lib as lib  # noqa: E402
@@ -161,7 +167,8 @@ class FullPathTests(IntegrationBase):
         gate = self.gate()
         for attempt in range(1, 4):
             gate.claim("46", 0.05, provider=provider(daily=0.0))
-            gate.finish("46", "failed", 0.01, detail="tests failed", notify=False)
+            gate.finish("46", "failed", 0.01, detail="tests failed", notify=False,
+                        force=True)      # force: mô phỏng ghi lại sau khi gỡ chặn thủ công
             self.assertEqual(gate.attempts("46")["attempts"], attempt)
         self.assertEqual(gate.attempts("46")["retries_left"], 0)
         blocked = gate.can_start("46", 0.05, provider=provider(daily=0.0))
@@ -337,6 +344,110 @@ class GateStatePathTests(unittest.TestCase):
         self.assertIn("already processed", verdict["reason"])
         # hạn mức issue/ngày cũng phải thấy 1 issue đã dùng
         self.assertEqual(gate.state.usage()["issues"], 1)
+
+
+class FinishIdempotencyTests(IntegrationBase):
+    """Mục 2: gọi finish lần hai KHÔNG được gửi tin trùng và KHÔNG ghi chi phí trùng."""
+
+    def test_a_second_finish_sends_nothing_and_records_no_cost(self):
+        gate = self.gate()
+        gate.claim("80", 0.05, provider=provider(daily=0.0))
+        first = gate.finish("80", "done", 0.002, pr="https://example.invalid/pull/80",
+                            tests="1 passed")
+        self.assertTrue(first["notified"]["ok"])
+        messages_before = len(self.messages())
+        ledger_before = len(budget.BudgetGuard(self.budget_dir).entries())
+
+        second = gate.finish("80", "done", 0.002, pr="https://example.invalid/pull/80",
+                             tests="1 passed")
+        self.assertTrue(second["already_settled"])
+        self.assertEqual(second["cost_recorded_usd"], 0.0)
+        self.assertEqual(second["hold_released_usd"], 0.0)
+        self.assertEqual(second["settled_as"], "done")
+        self.assertIn("already settled", second["notified"]["skipped"])
+        self.assertEqual(len(self.messages()), messages_before)          # không tin thứ 2
+        self.assertEqual(len(budget.BudgetGuard(self.budget_dir).entries()),
+                         ledger_before)                                   # không chi phí thứ 2
+        self.assertEqual(second["attempts"], 1)
+
+    def test_the_spend_is_unchanged_after_the_duplicate_attempt(self):
+        gate = self.gate()
+        gate.claim("82", 0.05, provider=provider(daily=0.0))
+        gate.finish("82", "done", 0.03, notify=False)
+        before = budget.BudgetGuard(self.budget_dir).spend_today(provider(daily=0.0))["spend"]
+        gate.finish("82", "done", 0.03, notify=False)
+        after = budget.BudgetGuard(self.budget_dir).spend_today(provider(daily=0.0))["spend"]
+        self.assertAlmostEqual(before, after, places=9)
+
+    def test_force_re_settlement_is_an_explicit_opt_in(self):
+        gate = self.gate()
+        gate.claim("81", 0.05, provider=provider(daily=0.0))
+        gate.finish("81", "done", 0.002, notify=False)
+        again = gate.finish("81", "done", 0.003, notify=False, force=True)
+        self.assertFalse(again.get("already_settled", False))
+        self.assertEqual(again["attempts"], 2)          # có ý định thì vẫn ghi được
+
+
+class LegacyAckTests(IntegrationBase):
+    """Mục 4: ngoại lệ legacy phải hiển thị rõ, và KHÔNG được bịt cảnh báo task mới."""
+
+    def _ack(self, payload):
+        path = os.path.join(self.tmp, "ack.json")
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle)
+        return path
+
+    def _process(self, issue, cost=0.05):
+        store = lib.StateStore(self.state_path)
+        with store.transaction():
+            store.mark_processed(issue, "done", cost=cost)
+
+    def test_an_acknowledged_legacy_issue_is_listed_but_no_longer_red(self):
+        self._process("2")
+        gate = worker_gate.Gate(self.state_path, self.budget_dir,
+                                ack_file=self._ack({"2": {"reason": "closed before the gate"}}))
+        out = gate.audit()
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["missing_settlement"], [])
+        self.assertIn("2", out["acknowledged_legacy"])                  # vẫn hiển thị
+        self.assertEqual(out["acknowledged_legacy"]["2"]["reason"], "closed before the gate")
+        self.assertIn("acknowledged_legacy", out["note"])
+        self.assertIn("2", out["processed_today"])                      # lịch sử còn nguyên
+
+    def test_the_ack_file_never_silences_a_new_issue(self):
+        self._process("2")
+        self._process("99")                                             # task MỚI, không ack
+        gate = worker_gate.Gate(self.state_path, self.budget_dir,
+                                ack_file=self._ack({"2": {"reason": "legacy"}}))
+        out = gate.audit()
+        self.assertFalse(out["ok"])                                     # vẫn ĐỎ
+        self.assertEqual(out["missing_settlement"], ["99"])
+        self.assertEqual(list(out["acknowledged_legacy"].keys()), ["2"])
+
+    def test_a_missing_or_broken_ack_file_is_not_an_error(self):
+        self._process("2")
+        for payload in (None, "not json"):
+            path = os.path.join(self.tmp, "nope.json")
+            if payload is not None:
+                with open(path, "w", encoding="utf-8") as handle:
+                    handle.write(payload)
+            gate = worker_gate.Gate(self.state_path, self.budget_dir, ack_file=path)
+            out = gate.audit()
+            self.assertFalse(out["ok"])                                 # không có ack ⇒ đỏ
+            self.assertEqual(out["missing_settlement"], ["2"])
+            self.assertEqual(out["acknowledged_legacy"], {})
+
+    def test_the_shipped_ack_file_only_names_pre_gate_issues(self):
+        """File ngoại lệ đi kèm repo: chỉ chứa issue đóng TRƯỚC khi cổng lên main."""
+        shipped = os.path.join(ROOT, "scripts", "legacy_unsettled.json")
+        with open(shipped, encoding="utf-8") as handle:
+            data = json.load(handle)
+        self.assertEqual(sorted(data.keys()), ["2"])
+        entry = data["2"]
+        self.assertIn("2026-10-16T05:15:23Z", entry["reason"])
+        self.assertIn("gate_landed_on_main_at", entry["evidence"])
+        self.assertIn("never matches a new issue", entry["scope"])
+        self.assertIn("pre-gate", entry["scope"])
 
 
 if __name__ == "__main__":
