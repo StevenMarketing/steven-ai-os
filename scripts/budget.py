@@ -238,10 +238,75 @@ def _sanitize_budgets(raw: Any) -> List[Dict[str, Any]]:
     return out
 
 
+KEY_ROLES = (("worker", "WORKER_OPENROUTER_API_KEY"), ("chat", "OPENROUTER_API_KEY"))
+KEY_NAMES = tuple(name for _role, name in KEY_ROLES)
+
+
+def _aggregate_keys(parts: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Cộng số của nhiều khoá thành trần hệ thống; giữ breakdown theo vai trò.
+
+    Trần $3/ngày là của **toàn hệ thống**, nên khi worker có khoá riêng thì con số phải
+    là **tổng** hai khoá, không phải chỉ khoá này hay khoá kia. Breakdown chỉ gồm vai trò +
+    số liệu; **không** chứa tên khoá, nhãn khoá hay giá trị khoá.
+    """
+    ok_parts = [p for p in parts if p.get("ok")]
+
+    def _sum(field: str) -> Optional[float]:
+        values = [p.get(field) for p in ok_parts if p.get(field) is not None]
+        return round(sum(values), 6) if values else None
+
+    budgets: List[Dict[str, Any]] = []
+    for part in ok_parts:
+        for budget in part.get("budgets") or []:
+            budgets.append(dict(budget, role=part.get("role")))
+    return {
+        "ok": bool(ok_parts) or all(not p.get("ok") for p in parts) and bool(parts),
+        "label": None,
+        "keys_read": [p.get("role") for p in parts],
+        "usage_usd": _sum("usage_usd") or 0.0,
+        "limit_usd": _sum("limit_usd"),
+        "remaining_usd": _sum("remaining_usd"),
+        "usage_daily_usd": _sum("usage_daily_usd"),
+        "usage_weekly_usd": _sum("usage_weekly_usd"),
+        "usage_monthly_usd": _sum("usage_monthly_usd"),
+        "budgets": budgets,
+        "expires_at": min([p.get("expires_at") for p in ok_parts if p.get("expires_at")] or [None]),
+        "is_free_tier": all(p.get("is_free_tier") for p in ok_parts) if ok_parts else None,
+        "source": "provider-confirmed (all keys)",
+        "per_key": [{"role": p.get("role"), "ok": bool(p.get("ok")),
+                     "usage_daily_usd": p.get("usage_daily_usd"),
+                     "limit_usd": p.get("limit_usd"),
+                     "remaining_usd": p.get("remaining_usd"),
+                     "error": p.get("error")} for p in parts],
+        "errors": [{"role": p.get("role"), "error": p.get("error")} for p in parts
+                   if not p.get("ok")],
+    }
+
+
+def worker_key_usage(token: Optional[str] = None,
+                     transport: Optional[Transport] = None) -> Dict[str, Any]:
+    """Số của **riêng khoá worker** (nếu có). Dùng để biết hạn mức cứng của worker."""
+    secret = token or read_env_value("WORKER_OPENROUTER_API_KEY")
+    if not secret:
+        return {"ok": False, "role": "worker", "configured": False,
+                "error": "chưa cấu hình WORKER_OPENROUTER_API_KEY (worker đang dùng khoá chung)"}
+    try:
+        payload = (transport or http_get_json)(OPENROUTER_URL, secret)
+    except Exception as exc:                                  # noqa: BLE001
+        return {"ok": False, "role": "worker", "configured": True,
+                "error": type(exc).__name__}
+    parsed = _parse_provider_payload(payload, source="provider-confirmed (worker key)")
+    return {**parsed, "role": "worker", "configured": True}
+
+
 def provider_usage(token: Optional[str] = None, transport: Optional[Transport] = None,
                    env_file: Optional[str] = None,
                    provider_file: Optional[str] = None) -> Dict[str, Any]:
     """Số provider xác nhận. Không bao giờ trả về hay in token.
+
+    Khi không có `token`/`transport`/`provider_file` cụ thể, hàm đọc **mọi khoá** đã cấu
+    hình (`WORKER_OPENROUTER_API_KEY` trước, rồi `OPENROUTER_API_KEY`) và **cộng lại**, vì
+    trần $3/ngày là của toàn hệ thống. Giá trị khoá không bao giờ xuất hiện trong kết quả.
 
     ``provider_file`` (hoặc biến môi trường ``STEVEN_BUDGET_PROVIDER_FILE``) đọc
     phản hồi provider từ file JSON: dùng cho test offline và môi trường không có
@@ -256,6 +321,22 @@ def provider_usage(token: Optional[str] = None, transport: Optional[Transport] =
             return {"ok": False,
                     "error": f"không đọc được provider-file ({type(exc).__name__})"}
         return _parse_provider_payload(payload, source="provider-file")
+    if token is None and transport is None and env_file is None:
+        parts: List[Dict[str, Any]] = []
+        for role, name in KEY_ROLES:
+            secret = read_env_value(name)
+            if not secret:
+                continue
+            try:
+                parsed = _parse_provider_payload(http_get_json(OPENROUTER_URL, secret),
+                                                 source="provider-confirmed")
+            except Exception as exc:                          # noqa: BLE001
+                parsed = {"ok": False, "error": type(exc).__name__}
+            parts.append(dict(parsed, role=role))
+        if parts:
+            return _aggregate_keys(parts)
+        return {"ok": False,
+                "error": f"không tìm thấy khoá nào trong {', '.join(KEY_NAMES)}"}
     if transport is None:
         secret = token if token is not None else read_env_value("OPENROUTER_API_KEY", env_file)
         if not secret:
