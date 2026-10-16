@@ -226,6 +226,18 @@ def read_env_value(name: str, env_file: Optional[str] = None) -> str:
     return ""
 
 
+def _sanitize_budgets(raw: Any) -> List[Dict[str, Any]]:
+    """Chỉ giữ các trường ngân sách cần thiết (bỏ id nội bộ của provider)."""
+    out: List[Dict[str, Any]] = []
+    for item in raw or []:
+        if not isinstance(item, dict):
+            continue
+        out.append({key: item.get(key) for key in
+                    ("scope", "limit_usd", "spend_usd", "remaining_usd",
+                     "reset_interval", "resets_at")})
+    return out
+
+
 def provider_usage(token: Optional[str] = None, transport: Optional[Transport] = None,
                    env_file: Optional[str] = None) -> Dict[str, Any]:
     """Số provider xác nhận. Không bao giờ trả về hay in token."""
@@ -244,12 +256,27 @@ def provider_usage(token: Optional[str] = None, transport: Optional[Transport] =
         remaining = None if limit is None else round(float(limit) - float(usage), 6)
     except (TypeError, ValueError):
         remaining = None
+
+    def _num(value: Any) -> Optional[float]:
+        if value is None:
+            return None
+        try:
+            return round(float(value), 6)
+        except (TypeError, ValueError):
+            return None
+
     return {
         "ok": True,
         "label": None,                    # cố ý bỏ: nhãn khoá là thông tin nhạy cảm
         "usage_usd": round(float(usage), 6) if usage else 0.0,
         "limit_usd": None if limit is None else float(limit),
-        "remaining_usd": remaining,
+        "remaining_usd": (remaining if remaining is not None
+                          else _num(data.get("limit_remaining"))),
+        "usage_daily_usd": _num(data.get("usage_daily")),
+        "usage_weekly_usd": _num(data.get("usage_weekly")),
+        "usage_monthly_usd": _num(data.get("usage_monthly")),
+        "budgets": _sanitize_budgets(data.get("budgets")),
+        "expires_at": data.get("expires_at"),
         "is_free_tier": data.get("is_free_tier"),
         "source": "provider-confirmed",
     }
@@ -285,9 +312,19 @@ def provider_today(state_dir: Optional[str] = None, usage: Optional[Dict[str, An
     except OSError:
         pass
     spent = round(float(record["last"]) - float(record["baseline"]), 6)
-    return {"ok": True, "day": day, "spent_today_usd": max(0.0, spent),
+    daily = current.get("usage_daily_usd")
+    # Ưu tiên số theo ngày do provider xác nhận; chỉ dùng mốc cục bộ khi provider
+    # không cung cấp trường đó.
+    if daily is None:
+        spent_today, basis = max(0.0, spent), "local baseline delta"
+    else:
+        spent_today, basis = float(daily), "provider usage_daily"
+    return {"ok": True, "day": day, "spent_today_usd": spent_today,
+            "basis": basis,
             "total_usage_usd": record["last"], "limit_usd": record.get("limit_usd"),
-            "remaining_usd": record.get("remaining_usd")}
+            "remaining_usd": record.get("remaining_usd"),
+            "usage_weekly_usd": current.get("usage_weekly_usd"),
+            "usage_monthly_usd": current.get("usage_monthly_usd")}
 
 
 # --------------------------------------------------------------------------

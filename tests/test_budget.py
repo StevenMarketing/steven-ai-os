@@ -166,6 +166,46 @@ class ProviderTests(unittest.TestCase):
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
+    def test_provider_usage_exposes_the_period_figures(self):
+        def fake(url, token):
+            return {"data": {"usage": 4.6183, "limit": 10, "usage_daily": 1.440867,
+                             "usage_weekly": 4.6183, "usage_monthly": 4.6183,
+                             "limit_remaining": 5.381699,
+                             "expires_at": "2027-04-12T23:19:06.832Z"}}
+
+        info = budget.provider_usage(token="k", transport=fake)
+        self.assertAlmostEqual(info["usage_daily_usd"], 1.440867, places=5)
+        self.assertAlmostEqual(info["usage_weekly_usd"], 4.6183, places=4)
+        self.assertAlmostEqual(info["usage_monthly_usd"], 4.6183, places=4)
+        self.assertEqual(info["expires_at"], "2027-04-12T23:19:06.832Z")
+
+    def test_provider_budgets_are_sanitized(self):
+        def fake(url, token):
+            return {"data": {"usage": 4.6, "limit": 10,
+                             "budgets": [{"scope": "key_limit", "budget_id": "internal-id",
+                                          "guardrail_id": "g-123", "limit_usd": 10,
+                                          "spend_usd": 4.6, "remaining_usd": 5.4,
+                                          "reset_interval": "daily", "resets_at": None}]}}
+
+        info = budget.provider_usage(token="k", transport=fake)
+        self.assertEqual(len(info["budgets"]), 1)
+        entry = info["budgets"][0]
+        self.assertEqual(entry["limit_usd"], 10)
+        self.assertEqual(entry["reset_interval"], "daily")
+        self.assertNotIn("budget_id", entry, "id nội bộ của provider không được trả về")
+        self.assertNotIn("guardrail_id", entry)
+
+    def test_provider_today_prefers_the_provider_daily_figure(self):
+        tmp = tempfile.mkdtemp(prefix="t-prov4-")
+        try:
+            result = budget.provider_today(
+                tmp, {"ok": True, "usage_usd": 4.6183, "limit_usd": 10.0,
+                      "remaining_usd": 5.3817, "usage_daily_usd": 1.440867}, now=NOW)
+            self.assertAlmostEqual(result["spent_today_usd"], 1.440867, places=5)
+            self.assertEqual(result["basis"], "provider usage_daily")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
     def test_provider_today_surfaces_an_unavailable_provider(self):
         result = budget.provider_today(tempfile.mkdtemp(prefix="t-prov2-"),
                                        {"ok": False, "error": "boom"}, now=NOW)
@@ -281,6 +321,13 @@ class GuardTests(unittest.TestCase):
         self.assertFalse(status["paused"])
         self.assertIn("KHÔNG có", status["note"])
         self.assertIn("hard cap", status["note"])
+
+    def test_status_sees_the_provider_daily_figure(self):
+        provider = dict(self.provider_ok, usage_daily_usd=1.25)
+        status = self.guard.status(provider=provider)
+        self.assertAlmostEqual(status["provider_today"]["spent_today_usd"], 1.25,
+                               places=4)
+        self.assertEqual(status["provider_today"]["basis"], "provider usage_daily")
 
     def test_no_secret_is_written_into_the_ledger(self):
         self.guard.record("issue-1", 0.01, "deepseek-v4.1-flash", note="no secrets here")

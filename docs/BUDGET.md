@@ -12,10 +12,15 @@ in hoặc ghi API key.
 | Nguồn | Lấy ở đâu | Ý nghĩa |
 |---|---|---|
 | **Ước tính (Hermes)** | `sessions.estimated_cost_usd` trong `state.db`, `cost_source=provider_models_api` | ước tính theo bảng giá model; dùng để theo dõi nội bộ |
-| **Provider xác nhận (OpenRouter)** | `GET /api/v1/key` → `usage`, `limit` | **số dùng cho hoá đơn**; đây mới là căn cứ chặn chi tiêu |
+| **Provider xác nhận (OpenRouter)** | `GET /api/v1/key` → `usage`, `limit`, `usage_daily`, `usage_weekly`, `usage_monthly`, `limit_remaining`, `budgets[]` | **số dùng cho hoá đơn**; có cả số **theo ngày** do provider tính |
 
-`budget.py provider-today` giữ **mốc nối tiếp theo ngày** (`ops/budget/provider-usage.json`):
-sang ngày mới, mốc = giá trị cuối của ngày trước, nên phần đã tiêu không bị "quên".
+`budget.py provider-today` ưu tiên **`usage_daily` của provider** (chính xác tuyệt
+đối cho hôm nay); chỉ khi provider không trả trường đó mới dùng **mốc nối tiếp theo
+ngày** (`ops/budget/provider-usage.json`) — và mốc này nối tiếp giá trị cuối của
+ngày trước nên không "quên" phần đã tiêu.
+
+Số thật lúc kiểm tra: `usage_daily = $1.440867` · `weekly = $4.6183` ·
+`monthly = $4.6183` · `limit = $10` · còn `$5.381699` · khoá hết hạn 2027-04-12.
 
 ## 2. Số đo thật (đã kiểm chứng trên hệ thống này)
 
@@ -66,14 +71,19 @@ ngày/tuần/tháng), `--usage-file` (báo cáo JSON mỗi lần chạy one-shot
 Nhưng **không có** tham số nào bắt provider từ chối khi vượt một ngân sách ngày.
 
 ⇒ Chỉ có **hai** lớp chặn thật:
-1. **Hạn mức khoá OpenRouter** (`limit = $10` hiện tại) — trần cứng, do provider ép.
-   Chủ sở hữu có thể hạ/đặt lại trong dashboard OpenRouter (ví dụ ngân sách tháng).
-2. **Code của repo này** (`budget.py` + `budget_watchdog.py`) — cưỡng chế trần ngày.
+1. **Hạn mức khoá OpenRouter** — trần cứng do provider ép. Hiện tại khoá này có
+   `limit = $10` với **`reset_interval = null`** (hạn mức *tổng*, không tự reset).
+   🎯 **Đề xuất cụ thể (đã kiểm chứng trường tồn tại trong API):** đặt hạn mức khoá
+   thành `limit_usd = 3` với **`reset_interval = "daily"`** trong dashboard
+   OpenRouter → khi đó trần **$3/ngày được provider cưỡng chế thật**, không phụ
+   thuộc vào code của repo này.
+2. **Code của repo này** (`budget.py` + `budget_watchdog.py`) — cưỡng chế trần ngày,
+   fail-closed, và là lớp duy nhất kiểm tra được *trước khi* gọi model.
 
 Không được tuyên bố "$3/ngày là bảo đảm tuyệt đối" nếu chỉ dựa vào lớp 2: nó chỉ
 chặn những đường đi **có gọi `can_spend()`**. Đề xuất: bật watchdog theo lịch
 (một cron riêng chạy script thuần, $0 chi phí AI) hoặc gọi `can-spend` ở đầu mỗi
-tác vụ tốn tiền.
+tác vụ tốn tiền. **Bật lớp 1 thì mới có bảo đảm cứng.**
 
 ## 5. Định tuyến model
 
