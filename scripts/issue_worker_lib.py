@@ -51,6 +51,13 @@ REQUIRED_SECTIONS = (
 MIN_SECTION_CHARS = 8
 MAX_BODY_CHARS = 16_000
 
+#: words that mean "I have not written this yet"
+PLACEHOLDER_WORDS = ("todo", "tbd", "tba", "n/a", "na", "none", "?", "...", "…", "-")
+
+_CHECKBOX = re.compile(r"^[\-*+]\s*\[[ xX]\]\s*")
+_NUMBERING = re.compile(r"^\d+[.)]\s*")
+_BULLET = re.compile(r"^[\-*+•]\s*")
+
 # --------------------------------------------------------------------------
 # Budget (self-enforced -- Hermes has no provider-level USD cap)
 # --------------------------------------------------------------------------
@@ -173,6 +180,36 @@ def split_sections(body: Optional[str]) -> Dict[str, str]:
     return sections
 
 
+def section_content(value: Optional[str]) -> str:
+    """Section text with checkbox / bullet / numbering markers and TODO words gone.
+
+    ``- [ ] the widget renders a ZIP column`` -> ``the widget renders a ZIP column``
+    ``- [ ]``                                 -> ```` (nothing)
+    """
+    meaningful: List[str] = []
+    for line in (value or "").splitlines():
+        text = line.strip()
+        for pattern in (_CHECKBOX, _NUMBERING, _BULLET):
+            text = pattern.sub("", text).strip()
+        if not text:
+            continue
+        if text.lower().rstrip(":.!") in PLACEHOLDER_WORDS:
+            continue
+        meaningful.append(text)
+    return " ".join(meaningful)
+
+
+def section_is_placeholder(value: Optional[str]) -> bool:
+    """True only when a section carries NO real content at all.
+
+    A genuine acceptance-criteria checklist -- ``- [ ] the widget renders a ZIP
+    column`` -- is real content even while every box is still unticked, which is
+    exactly how the issue template asks for it. An empty checkbox, or a bare
+    TODO/TBD/``-``, is not.
+    """
+    return not section_content(value).strip()
+
+
 def validate_task(body: Optional[str]) -> List[str]:
     """Return a list of problems; empty means the body is a usable task."""
     problems: List[str] = []
@@ -189,11 +226,11 @@ def validate_task(body: Optional[str]) -> List[str]:
             problems.append(f"missing section: {name.title()}")
             continue
         value = sections[name]
-        # Placeholder check first: "- [ ] TODO" is short AND unfilled, and the
-        # actionable message is the placeholder one.
-        if value.lstrip().startswith(("- [ ]", "- [x]", "TODO", "TBD", "...")):
+        content = section_content(value)
+        if not content:
+            # only checkboxes with no text, a bare TODO, or nothing at all
             problems.append(f"section not filled in: {name.title()}")
-        elif len(value) < MIN_SECTION_CHARS:
+        elif len(content) < MIN_SECTION_CHARS:
             problems.append(f"section too thin: {name.title()}")
     return problems
 
@@ -288,8 +325,16 @@ def eligibility(issue: Dict[str, Any], events: Iterable[Dict[str, Any]],
     problems = validate_task(issue.get("body"))
     injections = scan_injection(issue.get("body"))
     eligible = authorised and not problems and not injections
-    if not eligible and not reason:
-        reason = "rejected"
+    if not eligible:
+        # The reason must name the ACTUAL cause: an approval that is missing, a
+        # task that cannot be used, or a tripwire -- never "approved by X" for an
+        # issue that is being refused for another reason.
+        if not authorised:
+            pass                                   # keep the approval reason
+        elif injections:
+            reason = "refused: prompt-injection tripwire " + ",".join(injections)
+        else:
+            reason = "refused: task not usable -- " + "; ".join(problems)
     return {
         "number": issue.get("number"),
         "title": issue.get("title"),
