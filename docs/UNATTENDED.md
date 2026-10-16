@@ -127,3 +127,27 @@ mỗi bước:
 `worker_gate.py` là **file mới** (không nằm trong protected path), nên nó được review
 như code thường; `scripts/issue_*.py` vẫn protected nên worker không thể tự sửa cổng.
 
+## Worker profile and budget split
+
+Công việc GitHub worker chạy trong profile `worker-agent`, tách hẳn khỏi profile mặc định:
+profile này có `.env`, `config.yaml`, `cron/`, `sessions/` và `state.db` **riêng**. Một cron job
+luôn thuộc về profile đang giữ nó — job nằm trong `worker-agent` thì đọc cấu hình, khoá và sổ
+cái của `worker-agent`, không phải của profile mặc định.
+
+Trần chi phí như đang cấu hình:
+
+- Trần của **cả hệ thống** là `$4.00/day`, được ép trong code bởi `scripts/budget.py`.
+- Trần **riêng của worker** là `$0.20/day` và `$0.06/issue`, tối đa **ba issue một ngày** và
+  chỉ **một worker** chạy tại một thời điểm.
+- **Hạn mức phía khoá** (provider-side key limits) là điểm dừng cứng: chạm hạn mức khoá thì
+  không lớp nào trong hai lớp trên gỡ được cho worker.
+
+Dừng worker bằng:
+
+```bash
+hermes -p worker-agent cron pause <job-id>
+hermes -p worker-agent cron remove <job-id>
+```
+
+Hoàn tác (rollback) là khôi phục bản sao lưu `cron/jobs.json` của profile mặc định.
+
