@@ -6,6 +6,29 @@ holds the data foundation: SQLite schema, a minimal repository layer, and tests.
 This is an OFFLINE / INTERNAL project. It makes no network calls and does not
 connect to Google. Tests use only the Python standard library.
 
+## Quickstart
+
+Start the demo dashboard (it binds to `127.0.0.1` only and runs in DRAFT MODE —
+nothing is published to Google):
+
+```sh
+PYTHONPATH=src python3 scripts/serve_ui.py --port 8000 --reset
+```
+
+Open it in a browser:
+
+```text
+http://127.0.0.1:8000/?area=overview
+```
+
+Run the test suite:
+
+```sh
+PYTHONPATH=src python3 -m unittest discover -s tests
+```
+
+A second run does not need `--reset`: the seeder is idempotent.
+
 ## Layout
 
     README.md
