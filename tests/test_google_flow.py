@@ -15,7 +15,7 @@ import google_flow as gf  # noqa: E402  (scripts/google_flow.py)
 SECRET = "client-secret-probe-value"
 FULL = {"GBP_ALLOW_LIVE_GOOGLE": "1", "GBP_GOOGLE_CLIENT_ID": "client-id-probe",
         "GBP_GOOGLE_CLIENT_SECRET": SECRET,
-        "GBP_OAUTH_REDIRECT_URI": "https://greply.adzdigital.com/api/google/oauth/callback"}
+        "GBP_OAUTH_REDIRECT_URI": "https://gbp.adzdigital.com/api/google/oauth/callback"}
 
 
 class LiveReadyTests(unittest.TestCase):
@@ -50,7 +50,7 @@ class StartFlowTests(unittest.TestCase):
         flow = gf.start_flow(environ=FULL)
         url = flow["authorization_url"]
         for needle in ("state=", "code_challenge=", "code_challenge_method=S256",
-                       "redirect_uri=https%3A%2F%2Fgreply.adzdigital.com", "scope="):
+                       "redirect_uri=https%3A%2F%2Fgbp.adzdigital.com", "scope="):
             self.assertIn(needle, url)
         self.assertNotIn(SECRET, url)
         self.assertGreaterEqual(len(flow["state"]), 20)

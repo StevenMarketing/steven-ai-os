@@ -99,8 +99,8 @@ def live_ready(environ: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
                     "have": have}
     if not conf["redirect_uri"]:
         return {"ready": False, "reason": "redirect_uri_missing",
-                "remedy": "set %s to the stable HTTPS callback (e.g. "
-                          "https://greply.adzdigital.com/api/google/oauth/callback)" % REDIRECT_ENV,
+                "remedy": "set %s to the stable HTTPS callback, e.g. "
+                          "https://gbp.adzdigital.com/api/google/oauth/callback" % REDIRECT_ENV,
                 "have": have}
     return {"ready": True, "reason": None, "remedy": "", "have": have}
 
