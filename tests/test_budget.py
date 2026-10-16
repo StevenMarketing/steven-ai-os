@@ -374,11 +374,27 @@ class CliTests(unittest.TestCase):
         code, _ = _capture(budget.main, ["--state-dir", self.tmp, "record",
                                          "--task", "issue-7", "--cost", "0.0123"])
         self.assertEqual(code, 0)
-        code, out = _capture(budget.main, ["--state-dir", self.tmp, "status",
-                                          "--json"])
+        # Test phải offline & tất định: bơm số provider từ file thay vì gọi mạng.
+        provider_file = os.path.join(self.tmp, "provider.json")
+        with open(provider_file, "w", encoding="utf-8") as handle:
+            json.dump({"data": {"limit": 10, "limit_remaining": 9.99, "usage": 0.01,
+                                "usage_daily": 0.0, "usage_weekly": 0.0,
+                                "usage_monthly": 0.0, "budgets": []}}, handle)
+        previous = os.environ.get("STEVEN_BUDGET_PROVIDER_FILE")
+        os.environ["STEVEN_BUDGET_PROVIDER_FILE"] = provider_file
+        try:
+            code, out = _capture(budget.main, ["--state-dir", self.tmp, "status",
+                                              "--json"])
+        finally:
+            if previous is None:
+                os.environ.pop("STEVEN_BUDGET_PROVIDER_FILE", None)
+            else:
+                os.environ["STEVEN_BUDGET_PROVIDER_FILE"] = previous
         self.assertEqual(code, 0)
         payload = json.loads(out)
+        # sổ cái 0.0123 > usage_daily 0.0 ⇒ số trong ngày = 0.0123 (max, không cộng trùng)
         self.assertAlmostEqual(payload["spent_today_usd"], 0.0123, places=6)
+        self.assertAlmostEqual(payload["ledger_today_usd"], 0.0123, places=6)
 
     def test_pause_and_resume_via_the_cli(self):
         self.assertEqual(_capture(budget.main, ["--state-dir", self.tmp, "pause",

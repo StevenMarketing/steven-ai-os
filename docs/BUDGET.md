@@ -111,3 +111,87 @@ rồi cấu hình (và ghi lại lý do).
 - Không tự tăng ngân sách, không tự đổi model/provider.
 - Không in, không ghi token/key vào log hay sổ cái (có test khẳng định).
 - Không tuyên bố bảo đảm tuyệt đối $3/ngày khi chưa có cưỡng chế ở cấp provider.
+
+## 8. Số theo ngày: lấy từ provider, KHÔNG đếm trùng
+
+Các phiên Hermes **khác** cũng tiêu cùng một API key, nên chỉ nhìn sổ cái nội bộ là
+sai. `spend_today()` nay trả về:
+
+```
+spend_today = max(provider.usage_daily, ledger_today)
+```
+
+Dùng `max` chứ **không cộng** vì sổ cái cục bộ là **tập con** của `usage_daily`
+(mọi khoản sổ cái ghi đều đã nằm trong số provider). Cộng hai nguồn sẽ đếm trùng.
+
+| Tình huống | Nguồn số | Kết quả |
+|---|---|---|
+| Provider đọc được, có `usage_daily` | `max(provider, sổ cái)` | chính xác kể cả phiên khác |
+| Provider đọc được, thiếu `usage_daily` | mốc nối tiếp theo ngày (baseline) ∪ sổ cái | dự phòng |
+| Provider không đọc được | chỉ sổ cái, `ok=False` | **fail-closed** |
+
+`can_spend()` cũng đọc provider ở **mỗi lần gọi** (không cache), nên một phiên khác
+vừa tiêu thêm là lần kiểm tra kế tiếp thấy ngay.
+
+Regression tests (`tests/test_budget_provider_guard.py`):
+
+| Ca | Test |
+|---|---|
+| phiên Hermes khác đã gần $3 | `test_other_hermes_sessions_near_the_cap_block_new_work` |
+| sổ cái cũ, provider vượt trần | `test_stale_ledger_with_provider_over_the_cap_is_refused` |
+| provider API không khả dụng | `test_an_unavailable_provider_fails_closed` |
+| task mới làm tổng vượt $3 | `test_a_task_that_pushes_the_total_over_the_cap_is_refused` |
+| không cộng trùng | `test_provider_and_ledger_are_not_double_counted` |
+| chuyển ngày, reset bộ đếm | `test_the_counter_resets_when_the_day_rolls_over` |
+| race condition | `test_concurrent_reservations_cannot_exceed_the_cap` |
+
+## 9. Chống race condition: giữ chỗ nguyên tử
+
+Hai task chạy song song có thể cùng đọc "còn $0.02" rồi cùng tiêu (TOCTOU).
+`BudgetGuard.reserve(task, estimate)` đặt **phần kiểm tra và phần ghi chỗ trong
+cùng một khoá liên tiến trình** (`flock` trên `ops/budget/budget.lock`):
+
+```bash
+python3 scripts/budget.py can-spend --estimate 0.05 --task issue-42 --reserve
+python3 scripts/budget.py release --task issue-42     # trả lại chỗ chưa dùng
+```
+
+Chỗ đã giữ được ghi với `kind="reserve"` nên **không** tính vào trần retry
+(`kind="attempt"`). Test 6 tiến trình cùng xin $0.05 với trần $0.10 ⇒ đúng **2**
+thắng, tổng không vượt trần.
+
+## 10. Watchdog: mã thoát và lỗi đã sửa
+
+| Mã | Nghĩa |
+|---|---|
+| `0` | còn ngân sách |
+| `1` | không đọc được số provider (chỉ đếm sổ cái) |
+| `3` | **đã chạm trần** — lớp trên phải pause worker |
+
+**Lỗi thật đã sửa:** trước đây nhánh "không đọc được provider" `return 1` **trước khi**
+xét `over_cap`, nên đúng lúc provider lỗi mà sổ cái đã vượt trần thì watchdog trả 1
+⇒ lớp trên tưởng "chỉ là lỗi đọc số" và **không pause worker**. Nay `over_cap` được
+xét trước và luôn thắng. Có test: `test_main_returns_3_when_over_cap_even_with_an_unreadable_provider`.
+
+`--enforce` (pause worker) và `--notify` (Telegram) là tuỳ chọn; mặc định watchdog
+**chỉ báo cáo**.
+
+## 11. Giới hạn cứng ở OpenRouter (khảo sát theo tài liệu chính thức)
+
+| Câu hỏi | Trả lời |
+|---|---|
+| Giới hạn $3/ngày ở **cấp API key**? | **CÓ.** `limit` (USD) + `limit_reset: "daily" | "weekly" | "monthly" | null`. Xem `GET /api/v1/key` → `limit`, `limit_reset`, `limit_remaining` |
+| Reset hằng ngày? | **CÓ** — "Resets happen automatically at **midnight UTC**", tuần bắt đầu Thứ Hai. Khớp với `usage_daily` (ngày UTC hiện tại) |
+| Khi chạm hạn mức thì sao? | Request bị **từ chối**: `402` với `error.metadata.limit_source = "openrouter_key_limit"` (hạn mức khoá) hoặc `403` với budget/guardrail. Có `remedy_hint` |
+| Đổi hạn mức bằng gì? | Dashboard (Keys → sửa khoá) **hoặc** Management API key + `PATCH /api/v1/keys/{hash}` với `{"limit": 3, "limit_reset": "daily"}`. Management key là loại khoá **khác** |
+| Có gián đoạn việc khác không? | **CÓ.** Trần nằm ở **cấp khoá**: chạm $3/ngày ⇒ **mọi** thứ dùng khoá đó (kể cả phiên chat với trợ lý) bị 402 tới 00:00 UTC. Đây là "dừng cứng", không phải "giảm tốc" |
+
+⚠️ **Chưa thay đổi gì**: khoá hiện có `limit = $10`, `limit_reset = null` (tổng, không
+reset) — đúng như chủ sở hữu mô tả. Không tự tạo/xoá/thay khoá nào.
+
+**Đề xuất (chờ chủ sở hữu quyết):** đặt `limit = 3` + `limit_reset = daily` cho khoá
+đang dùng ⇒ trần $3/ngày do provider cưỡng chế thật. Đánh đổi: hết $3 là toàn bộ
+Steven AI OS dừng tới 00:00 UTC. Phương án êm hơn: giữ provider ở mức cao (ví dụ
+`limit = 6` daily) làm **lưới an toàn**, còn trần mềm $3 vẫn do code giữ — code dừng
+worker sớm và báo Telegram, provider chỉ chặn khi code bị vô hiệu.
+

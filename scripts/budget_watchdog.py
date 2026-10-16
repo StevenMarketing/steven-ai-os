@@ -45,32 +45,44 @@ def _hermes(*args: str) -> Dict[str, Any]:
         return {"returncode": None, "error": str(exc)}
 
 
+def _notify(event: str, detail: str = "", spend: Optional[float] = None,
+            cap: Optional[float] = None) -> Dict[str, Any]:
+    """Thông báo qua Telegram; lỗi thông báo KHÔNG được làm watchdog thất bại."""
+    try:
+        import notify
+        text = notify.build_message(event, spend=spend, cap=cap, detail=detail)
+        return notify.send(text)
+    except Exception as exc:                                  # noqa: BLE001
+        return {"ok": False, "error": type(exc).__name__}
+
+
 def evaluate(guard: Optional[budget.BudgetGuard] = None,
              provider: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """Quyết định watchdog (không tác dụng phụ)."""
+    """Quyết định watchdog (không tác dụng phụ).
+
+    Dùng **max(số provider xác nhận, sổ cái cục bộ)** nên chi tiêu của các phiên
+    Hermes khác cũng bị tính. Khi provider không đọc được, vẫn phải kết luận được
+    \"đã chạm trần\" từ sổ cái — nếu không, watchdog sẽ **im lặng đúng lúc cần
+    dừng worker nhất**.
+    """
     guard = guard or budget.BudgetGuard()
     info = provider if provider is not None else budget.provider_usage()
-    local_spend = guard.spent_today()
-    provider_today = budget.provider_today(guard.dir, info, guard.now) if info.get("ok") \
-        else {"ok": False, "error": info.get("error")}
-    # Ưu tiên số provider xác nhận; fallback sổ cái cục bộ (thận trọng hơn).
-    if provider_today.get("ok"):
-        spend = max(float(provider_today.get("spent_today_usd") or 0.0), local_spend)
-        basis = "provider-confirmed (fallback: local ledger)"
-    else:
-        spend = local_spend
-        basis = "local ledger only (provider unreadable)"
+    spend_info = guard.spend_today(info)
+    spend = float(spend_info["spend"])
     remaining = round(guard.daily_usd - spend, 6)
     over = spend >= guard.daily_usd
     return {
         "daily_cap_usd": guard.daily_usd,
         "spend_today_usd": round(spend, 6),
         "remaining_usd": remaining,
-        "basis": basis,
+        "basis": spend_info["basis"],
         "over_cap": over,
         "provider": info,
-        "provider_today": provider_today,
-        "local_ledger_usd": round(local_spend, 6),
+        "provider_ok": spend_info["provider_ok"],
+        "provider_daily_usd": spend_info["provider_daily"],
+        "local_ledger_usd": round(float(spend_info["ledger"]), 6),
+        "unreadable_provider": not spend_info["provider_ok"],
+        "counts_local_only": not spend_info["provider_ok"],
         "enforced": guard.is_paused(),
     }
 
@@ -91,6 +103,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                                                            DEFAULT_JOB_ID))
     parser.add_argument("--enforce", action="store_true",
                         help="thật sự pause worker khi chạm trần")
+    parser.add_argument("--notify", action="store_true",
+                        help="gửi thông báo Telegram khi hành động / khi không đọc được số provider")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
 
@@ -101,6 +115,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if state["over_cap"] and args.enforce:
         state["action"] = enforce(guard, args.job_id)
         state["acted"] = True
+        if args.notify:
+            _notify("budget", detail="Watchdog đã pause worker vì chạm trần ngày.",
+                    spend=state["spend_today_usd"], cap=state["daily_cap_usd"])
+    elif state["unreadable_provider"] and args.notify:
+        _notify("worker_error",
+                detail=("Không đọc được số provider; watchdog chỉ còn sổ cái cục bộ "
+                        f"${state['local_ledger_usd']:.4f}."))
 
     if args.json:
         print(json.dumps(state, indent=2, sort_keys=True, default=str))
@@ -113,10 +134,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                                      else " (chưa enforce; dùng --enforce để dừng worker)"))
         else:
             print("Còn ngân sách — không cần hành động.")
+        if state["unreadable_provider"]:
+            print("CẢNH BÁO: không đọc được số provider — chỉ đếm sổ cái cục bộ.")
 
-    if not state["provider"].get("ok"):
-        return 1
-    return 3 if state["over_cap"] else 0
+    # Thứ tự ưu tiên mã thoát: 3 (đã chạm trần, kể cả khi chỉ đếm sổ cái) > 1 (không
+    # đọc được provider) > 0. Trước đây nhánh "không đọc được provider" trả 1 và che
+    # mất trạng thái chạm trần ⇒ lớp trên không pause worker.
+    if state["over_cap"]:
+        return 3
+    return 1 if state["unreadable_provider"] else 0
 
 
 if __name__ == "__main__":
