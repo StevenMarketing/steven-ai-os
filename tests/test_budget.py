@@ -309,7 +309,7 @@ class GuardTests(unittest.TestCase):
         try:
             guard = budget.BudgetGuard(self.tmp)
             self.assertEqual(guard.daily_usd, 1.25)
-            self.assertEqual(budget.DEFAULT_DAILY_USD, 3.0)
+            self.assertGreaterEqual(budget.DEFAULT_DAILY_USD, 3.0)
             self.assertEqual(guard.task_usd, budget.DEFAULT_TASK_USD)
             self.assertEqual(guard.max_attempts, budget.DEFAULT_MAX_ATTEMPTS)
         finally:
@@ -317,7 +317,7 @@ class GuardTests(unittest.TestCase):
 
     def test_status_reports_limits_usage_and_the_honest_note(self):
         status = self.guard.status(provider=self.provider_ok)
-        self.assertEqual(status["limits"]["daily_usd"], 3.0)
+        self.assertEqual(status["limits"]["daily_usd"], self.guard.daily_usd)
         self.assertFalse(status["paused"])
         self.assertIn("KHÔNG có", status["note"])
         self.assertIn("hard cap", status["note"])

@@ -59,7 +59,7 @@ class ProviderAwareDailyTests(unittest.TestCase):
     def test_other_hermes_sessions_near_the_cap_block_new_work(self):
         self.guard.record("my-task", 0.01)          # sổ cái của ta rất nhỏ
         allowed, reason = self.guard.can_spend(0.10, "new-task",
-                                               provider(usage_daily=2.95))
+                                               provider(usage_daily=self.guard.daily_usd - 0.05))
         self.assertFalse(allowed)
         self.assertIn("trần ngày", reason)
         self.assertIn("usage_daily", reason)        # nói rõ nguồn số
@@ -67,7 +67,7 @@ class ProviderAwareDailyTests(unittest.TestCase):
     # 2 — sổ cái chưa cập nhật, provider đã vượt trần
     def test_stale_ledger_with_provider_over_the_cap_is_refused(self):
         allowed, reason = self.guard.can_spend(0.001, "new-task",
-                                               provider(usage_daily=3.05))
+                                               provider(usage_daily=self.guard.daily_usd + 0.05))
         self.assertFalse(allowed)
         self.assertIn("trần ngày", reason)
 
@@ -85,9 +85,9 @@ class ProviderAwareDailyTests(unittest.TestCase):
 
     # 4 — task mới làm tổng vượt trần
     def test_a_task_that_pushes_the_total_over_the_cap_is_refused(self):
-        allowed, reason = self.guard.can_spend(0.05, "t", provider(usage_daily=2.98))
+        allowed, reason = self.guard.can_spend(0.05, "t", provider(usage_daily=self.guard.daily_usd - 0.02))
         self.assertFalse(allowed, reason)
-        allowed, reason = self.guard.can_spend(0.01, "t", provider(usage_daily=2.98))
+        allowed, reason = self.guard.can_spend(0.01, "t", provider(usage_daily=self.guard.daily_usd - 0.02))
         self.assertTrue(allowed, reason)
 
     # 5 — không đếm trùng
@@ -112,7 +112,7 @@ class ProviderAwareDailyTests(unittest.TestCase):
 
     # 6 — chuyển ngày và reset bộ đếm
     def test_the_counter_resets_when_the_day_rolls_over(self):
-        allowed, _ = self.guard.can_spend(0.05, "t", provider(usage_daily=2.99))
+        allowed, _ = self.guard.can_spend(0.05, "t", provider(usage_daily=self.guard.daily_usd - 0.01))
         self.assertFalse(allowed)
         tomorrow = budget.BudgetGuard(self.dir, now=NOW + DAY)
         allowed, reason = tomorrow.can_spend(0.05, "t", provider(usage_daily=0.02))
@@ -130,7 +130,7 @@ class ProviderAwareDailyTests(unittest.TestCase):
         self.assertEqual(status["spent_today_usd"], 1.1)
         self.assertEqual(status["spend_basis"], "max(provider usage_daily, local ledger)")
         self.assertEqual(status["ledger_today_usd"], 0.0)
-        self.assertEqual(status["remaining_today_usd"], 1.9)
+        self.assertEqual(status["remaining_today_usd"], status["limits"]["daily_usd"] - 1.1)
 
     def test_the_status_reports_an_absent_usage_daily(self):
         status = self.guard.status(provider(usage_daily=None))
@@ -201,23 +201,23 @@ class WatchdogTests(unittest.TestCase):
 
     def test_the_watchdog_detects_the_cap_from_the_ledger_when_the_provider_is_down(self):
         guard = budget.BudgetGuard(self.dir)            # giờ thật
-        guard.record("x", 3.01)
+        guard.record("x", guard.daily_usd + 0.01)
         state = budget_watchdog.evaluate(guard, provider(ok=False, error="URLError"))
         self.assertTrue(state["over_cap"])
         self.assertTrue(state["unreadable_provider"])
-        self.assertEqual(state["local_ledger_usd"], 3.01)
+        self.assertEqual(state["local_ledger_usd"], guard.daily_usd + 0.01)
 
     def test_the_watchdog_sees_other_sessions_through_the_provider_figure(self):
         guard = budget.BudgetGuard(self.dir)
-        state = budget_watchdog.evaluate(guard, provider(usage_daily=2.99))
+        state = budget_watchdog.evaluate(guard, provider(usage_daily=guard.daily_usd - 0.01))
         self.assertFalse(state["over_cap"])
         self.assertEqual(state["remaining_usd"], 0.01)
-        state = budget_watchdog.evaluate(guard, provider(usage_daily=3.5))
+        state = budget_watchdog.evaluate(guard, provider(usage_daily=guard.daily_usd + 0.5))
         self.assertTrue(state["over_cap"])
 
     def test_main_returns_3_when_over_cap_even_with_an_unreadable_provider(self):
         guard = budget.BudgetGuard(self.dir)
-        guard.record("x", 3.2)
+        guard.record("x", guard.daily_usd + 0.2)
         original = budget.provider_usage
         budget.provider_usage = lambda *a, **k: provider(ok=False, error="URLError")
         try:
@@ -404,6 +404,41 @@ class WorkerProfileTests(unittest.TestCase):
         self.assertIsNone(action["cron_default"])              # không có job ở profile mặc định
         self.assertIsNotNone(action["cron_worker_profile"])    # đã pause ở worker-agent
         self.assertTrue(guard.is_paused())
+
+
+class LimitResetTests(unittest.TestCase):
+    """Hạn mức reset theo kỳ: `remaining` phải lấy từ `limit_remaining`, không phải limit−usage."""
+
+    def test_remaining_uses_the_providers_limit_remaining_with_a_daily_limit(self):
+        # Đúng hình dạng thật của OpenRouter: usage là luỹ kế, limit reset theo ngày.
+        payload = {"data": {"limit": 3.0, "usage": 5.48, "usage_daily": 2.79,
+                            "limit_remaining": 0.206583,
+                            "budgets": [{"scope": "key_limit", "limit_usd": 3,
+                                         "spend_usd": 2.79, "remaining_usd": 0.206583,
+                                         "reset_interval": "daily"}]}}
+        parsed = budget._parse_provider_payload(payload)
+        self.assertAlmostEqual(parsed["remaining_usd"], 0.206583, places=6)
+        self.assertNotEqual(parsed["remaining_usd"], round(3.0 - 5.48, 6))
+
+    def test_a_daily_limit_key_is_not_wrongly_refused(self):
+        import tempfile
+        guard = budget.BudgetGuard(tempfile.mkdtemp(prefix="lim-"))
+        info = budget._parse_provider_payload(
+            {"data": {"limit": 3.0, "usage": 5.48, "limit_remaining": 0.206583}})
+        allowed, reason = guard.can_spend(0.05, "t", info)
+        self.assertTrue(allowed, reason)
+        self.assertNotIn("hết hạn mức", reason)
+
+    def test_the_fallback_still_works_when_limit_remaining_is_absent(self):
+        parsed = budget._parse_provider_payload({"data": {"limit": 10, "usage": 4}})
+        self.assertAlmostEqual(parsed["remaining_usd"], 6.0, places=6)
+
+    def test_the_system_cap_default_comes_from_one_constant(self):
+        """Trần hệ thống phải đọc từ DEFAULT_DAILY_USD (chưa đổi sang $4 ở lượt này)."""
+        import tempfile
+        self.assertGreaterEqual(budget.DEFAULT_DAILY_USD, 3.0)
+        self.assertEqual(budget.BudgetGuard(tempfile.mkdtemp(prefix="cap-")).daily_usd,
+                         budget.DEFAULT_DAILY_USD)
 
 
 if __name__ == "__main__":
