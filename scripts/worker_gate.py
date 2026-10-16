@@ -174,6 +174,46 @@ class Gate:
                 "retry_cap": guard.max_attempts,
                 "retries_left": max(0, guard.max_attempts - used)}
 
+    def audit(self, day: Optional[str] = None) -> Dict[str, Any]:
+        """Đối chiếu issue đã đóng hôm nay với sổ cái ngân sách (bộ **phát hiện** bypass).
+
+        Một lần chạy đi đúng đường để lại **hai** dấu vết: một dòng `attempt` trong sổ cái
+        ngân sách (do `finish` ghi) và một mục `processed` trong sổ cái worker. Thiếu vế
+        ngân sách nghĩa là đã có đường chạy **bỏ qua cổng**.
+
+        Vì sao cần: lớp ngân sách provider-aware nằm ở `worker_gate.py` (file mới, không
+        protected) chứ **không** nằm trong `issue_guard.py`/`issue_worker_lib.py` — mà sửa
+        file protected thì cần chủ sở hữu cho phép. Cổng chặn ở lời gọi runbook, nên cần một
+        bộ phát hiện độc lập: chỉ đọc file cục bộ, không gọi mạng, $0.
+        """
+        guard = self.guard()
+        target_day = day or guard._today()
+        self.state = lib.StateStore(self.state_path)      # đọc lại sổ cái worker trên đĩa
+        settled: Dict[str, float] = {}
+        for row in guard.entries():
+            if row.get("day") != target_day or row.get("kind") != "attempt":
+                continue
+            task = str(row.get("task") or "")
+            if task.startswith("issue-"):
+                settled[task] = round(settled.get(task, 0.0) + float(row.get("cost", 0.0)), 6)
+        processed: Dict[str, Any] = {}
+        for issue, record in (self.state.data.get("processed") or {}).items():
+            info = record if isinstance(record, dict) else {"outcome": str(record)}
+            finished = str(info.get("finished_at") or "")
+            if finished[:10] != target_day:
+                continue
+            processed[str(issue)] = {"outcome": info.get("outcome"), "pr": info.get("pr"),
+                                     "finished_at": finished}
+        missing = sorted(i for i in processed if task_key(i) not in settled)
+        return {"day": target_day,
+                "processed_today": processed,
+                "settled_tasks": {k: v for k, v in sorted(settled.items())},
+                "missing_settlement": missing,
+                "ok": not missing,
+                "note": ("ok=False nghĩa là một issue đã đóng mà không đi qua cổng ngân sách: "
+                         "kiểm tra ngay, đừng chỉ dựa vào runbook."),
+                }
+
     def report(self, provider: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         guard = self.guard()
         spend = guard.spend_today(provider)
@@ -220,6 +260,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     p = sub.add_parser("attempts", help="số lần đã thử và trần retry")
     p.add_argument("--issue", required=True)
 
+    p = sub.add_parser("audit", help="phát hiện issue đã đóng mà không qua cổng ngân sách")
+    p.add_argument("--day", default=None)
+    p.add_argument("--notify", action="store_true",
+                   help="báo Telegram khi phát hiện thiếu dấu vết ngân sách")
+
     sub.add_parser("report", help="số của cả hai lớp")
 
     args = parser.parse_args(argv)
@@ -235,12 +280,21 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                           detail=args.detail)
     elif args.command == "attempts":
         out = gate.attempts(args.issue)
+    elif args.command == "audit":
+        out = gate.audit(args.day)
+        if args.notify and not out["ok"]:
+            out["notified"] = gate.notify("worker_error", 0,
+                                          detail=("Cổng ngân sách bị bỏ qua cho issue "
+                                                  f"{', '.join(out['missing_settlement'])}: "
+                                                  "đã đóng mà không có dấu vết ngân sách."))
     else:
         out = gate.report()
 
     print(json.dumps(out, indent=2, sort_keys=True, default=str))
     if args.command in ("can-start", "claim"):
         return 0 if out["allowed"] else 1
+    if args.command == "audit":
+        return 0 if out["ok"] else 1
     return 0
 
 

@@ -238,5 +238,44 @@ class WatchdogIntegrationTests(IntegrationBase):
         self.assertEqual(self.messages(), [])
 
 
+class GateAuditTests(IntegrationBase):
+    """Bộ phát hiện bypass: issue đã đóng mà không có dấu vết ngân sách."""
+
+    def test_a_settled_run_is_reported_clean(self):
+        gate = self.gate()
+        gate.claim("60", 0.05, provider=provider(daily=0.0))
+        gate.finish("60", "done", 0.002, pr="https://example.invalid/pull/11", notify=False)
+        out = gate.audit()
+        self.assertTrue(out["ok"], out)
+        self.assertIn("issue-60", out["settled_tasks"])
+        self.assertIn("60", out["processed_today"])
+        self.assertEqual(out["missing_settlement"], [])
+
+    def test_a_run_that_skipped_the_gate_is_detected(self):
+        """Mô phỏng worker đi đường cũ (issue_guard finish) — không có hold/không có attempt."""
+        store = lib.StateStore(self.state_path)
+        with store.transaction():
+            store.mark_processed("61", "done", pr="https://example.invalid/pull/12", cost=0.001)
+            store.record_usage(0.001)
+        out = self.gate().audit()
+        self.assertFalse(out["ok"])
+        self.assertEqual(out["missing_settlement"], ["61"])
+        self.assertIn("61", out["processed_today"])
+
+    def test_the_audit_is_silent_on_a_quiet_day(self):
+        out = self.gate().audit()
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["processed_today"], {})
+        self.assertEqual(out["settled_tasks"], {})
+
+    def test_the_audit_only_looks_at_today(self):
+        store = lib.StateStore(self.state_path)
+        with store.transaction():
+            store.mark_processed("62", "done", cost=0.001)
+        out = self.gate().audit(day="1999-01-01")
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["processed_today"], {})
+
+
 if __name__ == "__main__":
     unittest.main()
