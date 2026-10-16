@@ -215,6 +215,9 @@ def finish_flow(code: str, state: str, flow_session: Optional[Dict[str, Any]], *
     if not _accepts_verifier(exchanger):
         # Never fall back to a verifier-less exchange: that would silently downgrade PKCE.
         raise FlowError("pkce_not_threaded")
+    if not session.get("code_verifier"):
+        # The flow was started with PKCE, so the exchange must carry the verifier.
+        raise FlowError("pkce_verifier_missing")
     # Burn first: claim the state, then exchange. A crash or a concurrent callback now
     # finds the state unusable instead of racing for a second token.
     session["used"] = True

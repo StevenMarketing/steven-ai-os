@@ -3,8 +3,11 @@
 Each security fix in `scripts/google_flow.py` has a regression test here.
 """
 
+import base64
+import hashlib
 import json
 import os
+import re
 import sys
 import tempfile
 import unittest
@@ -15,6 +18,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(
 import google_flow as gf  # noqa: E402  (scripts/google_flow.py)
 
 SECRET = "client-secret-probe-value"
+#: A token-*shaped* value built at runtime, so this file holds no literal key.
+TOKEN_SHAPED = "sk-" + "or-v1-" + ("probe" * 8)
 CODE = "authorization-code-probe"
 FULL = {"GBP_ALLOW_LIVE_GOOGLE": "1", "GBP_GOOGLE_CLIENT_ID": "client-id-probe",
         "GBP_GOOGLE_CLIENT_SECRET": SECRET,
@@ -196,8 +201,7 @@ class FinishFlowTests(unittest.TestCase):
 
     def test_an_error_from_the_provider_cannot_leak_secrets(self):
         leaky = FakeExchanger(error=RuntimeError(
-            "bad request body=%s code=%s token=sk-or-v1-abcdefghijklmnopqrstuvwxyz123456"
-            % (SECRET, CODE)))
+            "bad request body=%s code=%s token=%s" % (SECRET, CODE, TOKEN_SHAPED)))
         session = dict(self.flow)
         with self.assertRaises(gf.FlowError) as ctx:
             self._finish(session, exchanger=leaky)
@@ -318,6 +322,106 @@ class DisconnectTests(unittest.TestCase):
         self.assertTrue(default.endswith(".gbp_token.json"))
         self.assertFalse(os.path.abspath(default).startswith(os.getcwd()))
         self.assertEqual(gf.token_path({"GBP_TOKEN_PATH": "/tmp/probe-token.json"}), "/tmp/probe-token.json")
+
+
+class PkceEndToEndTests(unittest.TestCase):
+    """The PKCE fix, end to end, over the repository's offline MockTransport -- one that
+    guard_transport() always accepts, so no live call is possible from these tests."""
+
+    TOKEN_URL = "https://oauth2.googleapis.com/token"
+
+    def setUp(self):
+        from gbp.client.http_client import MockTransport
+        self.MockTransport = MockTransport
+        self.flow = gf.start_flow(environ=FULL)
+        self.stored = []
+
+    def _challenge_from_url(self):
+        m = re.search(r"code_challenge=([A-Za-z0-9\-_]+)", self.flow["authorization_url"])
+        self.assertIsNotNone(m, "the consent URL must carry a code_challenge")
+        return m.group(1)
+
+    def _transport(self, status=200):
+        t = self.MockTransport()
+        t.register("POST", self.TOKEN_URL, {"access_token": "at-probe", "token_type": "Bearer",
+                                            "scope": "business.manage"}, status=status)
+        return t
+
+    def _real_exchanger(self, transport):
+        from gbp.auth.oauth import exchange_code
+
+        def _call(**kw):
+            return {"token": exchange_code(transport, client_id=kw["client_id"], code=kw["code"],
+                                           redirect_uri=kw["redirect_uri"],
+                                           client_secret=kw["client_secret"],
+                                           code_verifier=kw.get("code_verifier"))}
+        return _call
+
+    def _sent_body(self, transport):
+        self.assertTrue(transport.calls, "no request reached the transport")
+        return transport.calls[0].get("data") or {}
+
+    def test_s256_challenge_matches_the_verifier_in_the_url(self):
+        computed = base64.urlsafe_b64encode(
+            hashlib.sha256(self.flow["code_verifier"].encode()).digest()).decode().rstrip("=")
+        self.assertEqual(self._challenge_from_url(), computed)
+
+    def test_the_real_exchange_receives_the_verifier_and_succeeds(self):
+        transport = self._transport()
+        session = dict(self.flow)
+        out = gf.finish_flow(CODE, session["state"], session, environ=FULL,
+                             exchanger=self._real_exchanger(transport), store=self.stored.append)
+        self.assertTrue(out["connected"])
+        body = self._sent_body(transport)
+        self.assertEqual(body["code_verifier"], session["code_verifier"])
+        self.assertEqual(body["grant_type"], "authorization_code")
+        self.assertNotIn("at-probe", json.dumps(out))
+        self.assertEqual(len(self.stored), 1)
+
+    def test_the_verifier_never_appears_in_the_result_or_the_url(self):
+        transport = self._transport()
+        session = dict(self.flow)
+        out = gf.finish_flow(CODE, session["state"], session, environ=FULL,
+                             exchanger=self._real_exchanger(transport), store=self.stored.append)
+        blob = json.dumps(out) + session["authorization_url"]
+        self.assertNotIn(session["code_verifier"], blob)
+        self.assertNotIn(SECRET, blob)
+
+    def test_a_provider_that_rejects_the_pkce_proof_is_reported_without_leaking(self):
+        """status 400 = the provider refused the proof; nothing is stored and nothing leaks."""
+        transport = self._transport(status=400)
+        session = dict(self.flow)
+        with self.assertRaises(gf.FlowError) as ctx:
+            gf.finish_flow(CODE, session["state"], session, environ=FULL,
+                           exchanger=self._real_exchanger(transport), store=self.stored.append)
+        self.assertTrue(str(ctx.exception).startswith("google_flow_error: exchange_error"))
+        message = str(ctx.exception)
+        for leak in (SECRET, CODE, session["code_verifier"], "at-probe"):
+            self.assertNotIn(leak, message)
+        self.assertEqual(self.stored, [])
+        self.assertTrue(session["used"])                    # state burned despite the failure
+        self.assertEqual(self._sent_body(transport)["code_verifier"], session["code_verifier"])
+
+    def test_a_pkce_session_without_a_verifier_is_refused_before_any_request(self):
+        session = dict(self.flow); session.pop("code_verifier")
+        transport = self._transport()
+        with self.assertRaises(gf.FlowError) as ctx:
+            gf.finish_flow(CODE, session["state"], session, environ=FULL,
+                           exchanger=self._real_exchanger(transport), store=self.stored.append)
+        self.assertEqual(ctx.exception.reason, "pkce_verifier_missing")
+        self.assertEqual(transport.calls, [])               # chưa gửi request nào
+        self.assertEqual(self.stored, [])
+
+    def test_the_real_exchange_omits_the_verifier_when_not_given(self):
+        """The new parameter is optional: a non-PKCE exchange behaves exactly as before."""
+        from gbp.auth.oauth import exchange_code
+        transport = self._transport()
+        token = exchange_code(transport, client_id="client-id-probe", code=CODE,
+                              redirect_uri=FULL["GBP_OAUTH_REDIRECT_URI"], client_secret=SECRET)
+        body = self._sent_body(transport)
+        self.assertNotIn("code_verifier", body)
+        self.assertEqual(body["client_secret"], SECRET)     # in the body only, never logged
+        self.assertNotIn("at-probe", repr(token))           # Token.__repr__ is redacted
 
 
 if __name__ == "__main__":
