@@ -61,11 +61,23 @@ def task_key(issue: Any) -> str:
 class Gate:
     """Hai lớp cưỡng chế, một cửa vào."""
 
+    @staticmethod
+    def _resolve_state_path(state_dir: Optional[str]) -> str:
+        """Cùng quy ước với `issue_guard.py`: mặc định là `<dir>/state.json`.
+
+        Nếu người gọi đưa vào một **thư mục** thì thêm `state.json` — trước đây module
+        dùng thẳng `lib.default_state_dir()` (một thư mục), nên nó đọc file rỗng và
+        tưởng chưa issue nào được xử lý: idempotency cùng hạn mức issue/ngày mất tác dụng.
+        """
+        path = state_dir or os.path.join(lib.default_state_dir(), "state.json")
+        if os.path.isdir(path):
+            return os.path.join(path, "state.json")
+        return path
+
     def __init__(self, state_dir: Optional[str] = None,
                  budget_dir: Optional[str] = None,
                  now: Optional[float] = None) -> None:
-        # `--state` theo cùng quy ước với issue_guard.py: đường dẫn tệp sổ cái của worker.
-        self.state_path = state_dir or lib.default_state_dir()
+        self.state_path = self._resolve_state_path(state_dir)
         self.state = lib.StateStore(self.state_path)
         self.budget_dir = budget_dir or budget.default_state_dir()
         self.now = now
@@ -163,6 +175,23 @@ class Gate:
             text = notify_mod.build_message(event, issue=issue, pr=pr, tests=tests,
                                             detail=detail)
             return notify_mod.send(text)
+        except Exception as exc:                          # noqa: BLE001
+            return {"ok": False, "error": type(exc).__name__}
+
+    def notify_once_for_audit(self, out: Dict[str, Any]) -> Dict[str, Any]:
+        """Cảnh báo bypass **một lần mỗi ngày cho mỗi tập issue** (shim chạy mỗi phút)."""
+        issues = ",".join(out.get("missing_settlement") or [])
+        label = f"gate-audit-{out.get('day')}-{issues}"
+        try:
+            import notify as notify_mod
+            if label in notify_mod.notified_today(self.budget_dir)["sent"]:
+                return {"ok": True, "skipped": "already notified today"}
+            result = self.notify("worker_error", 0,
+                                 detail=("Cổng ngân sách bị bỏ qua cho issue "
+                                         f"{issues}: đã đóng mà không có dấu vết ngân sách."))
+            if result.get("ok"):
+                notify_mod.mark_notified(label, self.budget_dir)
+            return result
         except Exception as exc:                          # noqa: BLE001
             return {"ok": False, "error": type(exc).__name__}
 
@@ -283,10 +312,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     elif args.command == "audit":
         out = gate.audit(args.day)
         if args.notify and not out["ok"]:
-            out["notified"] = gate.notify("worker_error", 0,
-                                          detail=("Cổng ngân sách bị bỏ qua cho issue "
-                                                  f"{', '.join(out['missing_settlement'])}: "
-                                                  "đã đóng mà không có dấu vết ngân sách."))
+            out["notified"] = gate.notify_once_for_audit(out)
     else:
         out = gate.report()
 

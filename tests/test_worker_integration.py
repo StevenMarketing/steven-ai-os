@@ -277,5 +277,67 @@ class GateAuditTests(IntegrationBase):
         self.assertEqual(out["processed_today"], {})
 
 
+    def test_the_bypass_alert_is_sent_at_most_once_a_day(self):
+        store = lib.StateStore(self.state_path)
+        with store.transaction():
+            store.mark_processed("70", "done", cost=0.001)
+        gate = self.gate()
+        out = gate.audit()
+        self.assertFalse(out["ok"])
+        first = gate.notify_once_for_audit(out)
+        self.assertTrue(first["ok"], first)
+        second = gate.notify_once_for_audit(out)
+        self.assertEqual(second.get("skipped"), "already notified today")
+        self.assertEqual(len(self.messages()), 1)
+
+
+class GateStatePathTests(unittest.TestCase):
+    """Regression: cổng phải đọc ĐÚNG sổ cái worker (lỗi thật phát hiện 2026-10-16).
+
+    Trước đây `Gate()` dùng thẳng `lib.default_state_dir()` — một **thư mục** — nên
+    `_load()` đọc file rỗng và cổng tưởng chưa issue nào được xử lý. Hệ quả: một issue
+    `hermes-done` vẫn được `can_start` cho phép chạy lại, và hạn mức issue/ngày của worker
+    ($0.15, 3 issue) không bao giờ chạm trần.
+    """
+
+    def setUp(self):
+        self.home = tempfile.mkdtemp(prefix="wg-home-")
+        self.previous = os.environ.get("HERMES_HOME")
+        os.environ["HERMES_HOME"] = self.home
+
+        def restore():
+            if self.previous is None:
+                os.environ.pop("HERMES_HOME", None)
+            else:
+                os.environ["HERMES_HOME"] = self.previous
+        self.addCleanup(restore)
+        self.budget_dir = os.path.join(self.home, "budget")
+
+    def test_the_default_state_path_follows_the_guard_convention(self):
+        gate = worker_gate.Gate(budget_dir=self.budget_dir)
+        self.assertEqual(gate.state_path,
+                         os.path.join(lib.default_state_dir(), "state.json"))
+        self.assertFalse(os.path.isdir(gate.state_path))
+
+    def test_a_directory_argument_resolves_to_state_json(self):
+        directory = os.path.join(self.home, "worker")
+        os.makedirs(directory, exist_ok=True)
+        gate = worker_gate.Gate(directory, budget_dir=self.budget_dir)
+        self.assertEqual(gate.state_path, os.path.join(directory, "state.json"))
+
+    def test_a_done_issue_is_refused_through_the_default_path(self):
+        """Đây là test sẽ bắt được lỗi: đóng issue rồi hỏi lại qua đường dẫn mặc định."""
+        store = lib.StateStore(os.path.join(lib.default_state_dir(), "state.json"))
+        with store.transaction():
+            store.mark_processed("2", "done", pr="https://example.invalid/pull/4", cost=0.05)
+            store.record_usage(0.05)
+        gate = worker_gate.Gate(budget_dir=self.budget_dir)
+        verdict = gate.can_start("2", 0.05, provider=provider(daily=0.0))
+        self.assertFalse(verdict["allowed"])
+        self.assertIn("already processed", verdict["reason"])
+        # hạn mức issue/ngày cũng phải thấy 1 issue đã dùng
+        self.assertEqual(gate.state.usage()["issues"], 1)
+
+
 if __name__ == "__main__":
     unittest.main()
