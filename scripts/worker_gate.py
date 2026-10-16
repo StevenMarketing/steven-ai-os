@@ -45,6 +45,21 @@ import issue_worker_lib as lib  # noqa: E402
 DEFAULT_ESTIMATE = 0.05
 DEFAULT_TTL = lib.CLAIM_TTL_SECONDS
 
+
+def issue_caps() -> Dict[str, Any]:
+    """Hạn mức riêng của worker: $0.06/issue · **$0.20/ngày** · 3 issue/ngày.
+
+    Đây là **tham số truyền vào** `StateStore.can_start` (và `remaining_today`), nên không
+    phải sửa `issue_worker_lib.py` — vốn là protected path. Mặc định trong lib vẫn là
+    $0.15/ngày; mức $0.20 ở đây là chủ ý: 3 × $0.06 = $0.18 > $0.15 nên với trần cũ issue
+    thứ ba **luôn** bị từ chối. Đổi được bằng biến môi trường để không phải sửa code.
+    """
+    return {
+        "per_issue_usd": float(os.environ.get("STEVEN_WORKER_PER_ISSUE_USD") or 0.06),
+        "per_day_usd": float(os.environ.get("STEVEN_WORKER_PER_DAY_USD") or 0.20),
+        "issues_per_day": int(os.environ.get("STEVEN_WORKER_ISSUES_PER_DAY") or 3),
+    }
+
 OUTCOME_EVENT = {
     "done": "task_done",
     "failed": "task_failed",
@@ -105,7 +120,10 @@ class Gate:
         # một Gate) không được kết luận dựa trên ảnh chụp cũ của sổ cái.
         self.state = lib.StateStore(self.state_path)
         ok_budget, budget_reason, spend = self.budget_check(issue, estimate, provider)
-        ok_issue, issue_reason = self.state.can_start(issue, estimate)
+        caps = issue_caps()
+        ok_issue, issue_reason = self.state.can_start(
+            issue, estimate, max_per_issue=caps["per_issue_usd"],
+            max_per_day=caps["per_day_usd"], max_issues_per_day=caps["issues_per_day"])
         allowed = bool(ok_budget and ok_issue)
         return {
             "issue": issue,
@@ -179,7 +197,9 @@ class Gate:
         result: Dict[str, Any] = {
             "issue": issue, "outcome": outcome, "cost": cost, "pr": pr,
             "hold_released_usd": freed, "recorded": recorded,
-            "usage_today": usage, "remaining": store.remaining_today(),
+            "usage_today": usage,
+            "remaining": store.remaining_today(max_cost=issue_caps()["per_day_usd"],
+                                               max_issues=issue_caps()["issues_per_day"]),
             "attempts": guard.attempts(task), "retry_cap": guard.max_attempts,
             "notified": None,
         }
@@ -297,8 +317,12 @@ class Gate:
                        "daily_cap_usd": guard.daily_usd, "paused": guard.is_paused()},
             "worker": {"issues_today": used["issues"], "cost_today_usd": used["cost"],
                        "issues_cap": lib.MAX_ISSUES_PER_DAY,
-                       "cost_cap_usd": lib.MAX_COST_PER_DAY,
-                       "cost_per_issue_cap_usd": lib.MAX_COST_PER_ISSUE},
+                       "cost_cap_usd": issue_caps()["per_day_usd"],
+                       "cost_per_issue_cap_usd": issue_caps()["per_issue_usd"],
+                       "library_defaults_usd": {"per_day": lib.MAX_COST_PER_DAY,
+                                                "per_issue": lib.MAX_COST_PER_ISSUE},
+                       "caps_source": ("worker_gate (overrides the protected library "
+                                       "defaults; override via STEVEN_WORKER_* env vars)")},
         }
 
 

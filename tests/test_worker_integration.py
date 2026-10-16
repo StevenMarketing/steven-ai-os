@@ -450,5 +450,46 @@ class LegacyAckTests(IntegrationBase):
         self.assertIn("pre-gate", entry["scope"])
 
 
+class WorkerCapTests(IntegrationBase):
+    """Mục 5: trần worker $0.20/ngày (3 × $0.06 = $0.18 ⇒ trần cũ $0.15 chặn issue thứ ba)."""
+
+    def _use(self, cost, times=1):
+        store = lib.StateStore(self.state_path)
+        with store.transaction():
+            for _ in range(times):
+                store.record_usage(cost)
+
+    def test_the_default_caps_allow_three_issues_a_day(self):
+        self._use(0.06, times=2)                      # 2 issue, đã dùng $0.12
+        caps = worker_gate.issue_caps()
+        self.assertEqual(caps["per_issue_usd"], 0.06)
+        self.assertEqual(caps["per_day_usd"], 0.20)
+        self.assertEqual(caps["issues_per_day"], 3)
+        verdict = self.gate().can_start("90", 0.06, provider=provider(daily=0.0))
+        self.assertTrue(verdict["allowed"], verdict)
+
+    def test_the_old_cap_would_have_refused_the_third_issue(self):
+        self._use(0.06, times=2)
+        store = lib.StateStore(self.state_path)
+        allowed, reason = store.can_start("90", 0.06, max_per_issue=0.06,
+                                          max_per_day=0.15, max_issues_per_day=3)
+        self.assertFalse(allowed)
+        self.assertIn("daily budget", reason)
+        self.assertIn("0.15", reason)
+
+    def test_the_caps_can_be_tuned_without_touching_protected_code(self):
+        os.environ["STEVEN_WORKER_PER_DAY_USD"] = "0.05"
+        self.addCleanup(os.environ.pop, "STEVEN_WORKER_PER_DAY_USD", None)
+        self.assertEqual(worker_gate.issue_caps()["per_day_usd"], 0.05)
+        report = worker_gate.Gate(self.state_path, self.budget_dir).report(provider(daily=0.0))
+        self.assertEqual(report["worker"]["cost_cap_usd"], 0.05)
+        self.assertEqual(report["worker"]["library_defaults_usd"]["per_day"], 0.15)
+
+    def test_the_report_shows_where_the_caps_come_from(self):
+        report = self.gate().report(provider(daily=0.0))
+        self.assertIn("worker_gate", report["worker"]["caps_source"])
+        self.assertEqual(report["worker"]["library_defaults_usd"]["per_issue"], 0.06)
+
+
 if __name__ == "__main__":
     unittest.main()
