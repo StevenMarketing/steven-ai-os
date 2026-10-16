@@ -77,10 +77,12 @@ fixture demonstrates it).
 | AI cost per issue | $0.06 | `issue_worker_lib.MAX_COST_PER_ISSUE` |
 | AI cost per day | $0.15 | `MAX_COST_PER_DAY` |
 | Issues per day | 3 | `MAX_ISSUES_PER_DAY` |
-| Concurrent workers | 1 | claim + `kanban.max_in_progress_per_profile: 1` |
+| Concurrent workers | 1 | atomic claim + `with-lock` + `kanban.max_in_progress_per_profile: 1` |
 | Runtime per issue | 300 s | kanban `max_runtime_seconds` |
 | Poll interval | 10 min | cron schedule |
 | Claim TTL | 30 min | `CLAIM_TTL_SECONDS` (a crashed worker is retryable) |
+| API pagination | 100/page, max 20 pages | `issue_github.PER_PAGE` / `MAX_PAGES` |
+| Diff gate | always on | `scripts/hooks/pre-commit` + `pre-push` |
 
 > **Honest note.** Hermes has no provider-level USD cap. These ceilings are
 > self-enforced by `scripts/issue_guard.py`; the only hard money wall would be a
@@ -114,16 +116,36 @@ The poller reads it from `--token-file /opt/data/.env` (or `$GITHUB_TOKEN`).
 It is never echoed. `scripts/issue_guard.py check-secrets` additionally refuses
 to let a real credential value reach a commit.
 
-### 5.2 Push guard
+### 5.2 Mandatory diff gate + push guard
 
 ```bash
 cd /opt/data/gbp-integration
 git config --local core.hooksPath scripts/hooks
 ```
 
-`scripts/hooks/pre-push` refuses any push that writes `main`/`master`, deletes a
-branch, or is non-fast-forward. A deliberate human bypass exists:
-`HERMES_ALLOW_MAIN_PUSH=1 git push ...`.
+Two versioned hooks now enforce the same gate, so it cannot be skipped by
+forgetting a command:
+
+| Hook | Runs | What it refuses |
+|---|---|---|
+| `scripts/hooks/pre-commit` | before every commit | a real credential, or a protected path, in the **final** change set (committed range vs base + index + untracked files, so a new file cannot slip through before it is staged) |
+| `scripts/hooks/pre-push` | before every push | the same gate on the diff, **then** any push to `main`/`master`, any branch deletion, and any non-fast-forward (force) update |
+
+Both call `python3 scripts/issue_guard.py verify-diff`. Run it yourself at any
+time:
+
+```bash
+python3 scripts/issue_guard.py verify-diff --base origin/main --root .
+```
+
+Owner-only escape hatches (loud, and never applicable to a credential):
+
+```bash
+HERMES_ALLOW_PROTECTED=1 git commit ...   # lifts ONLY the protected-path rule
+HERMES_ALLOW_MAIN_PUSH=1 git push origin main   # human maintenance only
+```
+
+A credential finding can never be bypassed — that path has no environment flag.
 
 ### 5.3 Labels
 
@@ -174,22 +196,44 @@ git worktree add ../wt-issue-42 -b "$BRANCH" origin/main
 # ... implement inside ../wt-issue-42, respecting the issue's Scope ...
 
 PYTHONPATH=src python3 -m unittest discover -s tests     # must be green
+
+$G verify-diff --base origin/main          # MANDATORY before committing:
+                                           # protected paths + credentials,
+                                           # including new/untracked files
+$G check-paths --base origin/main          # path policy alone (exit 1 => stop)
+$G check-secrets --root .                  # credential scan alone (exit 1 => stop)
+
 git -C ../wt-issue-42 add -A
-git -C ../wt-issue-42 commit -m "feat(web): add ZIP column (#42)"
-git -C ../wt-issue-42 push -u origin "$BRANCH"           # hook allows a branch
+git -C ../wt-issue-42 commit -m "feat(web): add ZIP column (#42)"   # pre-commit
+                                           # re-runs verify-diff automatically
+git -C ../wt-issue-42 push -u origin "$BRANCH"   # hook allows a branch
 
-$G check-paths --base origin/main          # exit 1 => a protected path is in play
-$G check-secrets --root .                  # exit 1 => a credential is in the diff
-
-# open a DRAFT pull request with curl against the GitHub API, body from
-# .github/pull_request_template.md, containing "Closes #42"
-# then comment the result on the issue and label it hermes-done/hermes-blocked
+# open a DRAFT pull request (scripts/issue_pr.py builds the body from the PR
+# template and always contains "Closes #42"; a curl equivalent is fine):
+#   python3 -c "import sys;sys.path.insert(0,'scripts');import issue_pr as p;
+#               print(p.pr_body(42, summary='...', files=['web/app.js'],
+#                               tests='596 passed / 0 failed', cost=0.031))"
+# then comment the result and set the label hermes-done / hermes-blocked
 
 $G finish --issue 42 --outcome done --pr <PR-URL> --cost 0.031
 git worktree remove ../wt-issue-42
 ```
 
-## 7. Branch protection and rulesets — verified status
+## 7. Review hardening (PR #1 follow-ups)
+
+| Review item | How it is now enforced | Test |
+|---|---|---|
+| Protected paths + secrets checked **before commit and push**, on the final diff including new files | `verify-diff` runs from both `pre-commit` and `pre-push`; it unions the committed range vs base, the index and untracked files | `VerifyDiffTests`, `HookTests` |
+| No two workers on one issue, even with overlapping cron ticks | `flock`'d ledger + an `O_EXCL` marker file + TTL; `with-lock` holds a global single-worker lock | `ConcurrencyTests` (6 real competing processes: exactly one wins) |
+| Full pagination + fail-closed API handling | `issue_github.paginate` follows `Link`, and advances by page number when a full page has no Link; rate limits, 5xx, malformed bodies and unreadable timelines all raise — a failure is never read as "no approval" or "no work" | `PaginationTests`, `FailClosedTests` |
+| Owner-only, live label approval | `label_state` replays the timeline, so a removed-then-bot-reapplied label is refused and an out-of-order timeline is ordered by `created_at` | `LabelTimelineTests` |
+| Pull-request flow verified without touching GitHub | `issue_pr` takes a transport; the tests drive a recording fake and assert the draft payload, the comment, the labels, and that **every URL is `api.github.com`** (no Google, nothing else) | `PullRequestFlowTests` |
+
+The monitor marker for an API outage is the stable string `status=unavailable`
+(or `status=rate-limited`): the agent is woken once, told the report failed, and
+does nothing — never "assume there is no work".
+
+## 8. Branch protection and rulesets — verified status
 
 GitHub's own documentation (*Available rules for rulesets*) states:
 
@@ -213,7 +257,7 @@ Because of that, protection of `main` is enforced **in the worker**:
 the plan changes. It is documentation until then, and the worker deliberately
 has no `Administration` permission, so it cannot apply it itself.
 
-## 8. Troubleshooting
+## 9. Troubleshooting
 
 | Symptom | Cause | Action |
 |---|---|---|
@@ -223,6 +267,10 @@ has no `Administration` permission, so it cannot apply it itself.
 | issue ignored, comment says *needs info* | a required section is missing | fill in the issue template |
 | issue ignored, *injection* | the body trips a tripwire | rewrite the issue; do not put instructions for the agent in it |
 | `can-start` refuses | paused, claimed, done, or over budget | read the printed reason; `status` shows usage |
-| push refused by `hermes-guard` | it targeted `main` | push the branch instead |
+| push refused by `hermes-guard` | it targeted `main`, was a force update, or the diff gate failed | read the printed reason; push the branch instead |
+| `verify-diff` refuses a protected path | the change touches auth/security/hooks/the guard itself | hand it to a human, or use `HERMES_ALLOW_PROTECTED=1` for owner maintenance |
+| `verify-diff` refuses a credential | a live value or credential shape is in the diff | remove the value; this one has no bypass |
+| `REFUSED: another worker holds` | a cron tick or manual run is in flight | wait; the claim TTL is 30 min, or run `issue_guard reclaim` |
+| the monitor prints `status=unavailable` | the GitHub API call failed (fail-closed) | check the token and the network; nothing is treated as work meanwhile |
 | work seems stuck | claim TTL not yet expired | wait 30 min, or `issue_guard reclaim` |
 | agent runs but does nothing | looking at the poll report | if `eligible=0`, that is correct and costs nothing |

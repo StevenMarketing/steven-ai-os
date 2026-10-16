@@ -98,7 +98,16 @@ class AuthorisationTests(unittest.TestCase):
     def test_label_without_any_event_is_not_authorised(self):
         ok, reason = lib.is_authorised(ISSUES[101], [])
         self.assertFalse(ok)
-        self.assertIn("no hermes-ready label event", reason)
+        self.assertIn("no live hermes-ready approval", reason)
+
+    def test_a_removed_label_is_not_authorised(self):
+        events = [{"event": "labeled", "label": {"name": "hermes-ready"},
+                   "actor": {"login": "StevenMarketing"}},
+                  {"event": "unlabeled", "label": {"name": "hermes-ready"},
+                   "actor": {"login": "StevenMarketing"}}]
+        ok, reason = lib.is_authorised(ISSUES[101], events)
+        self.assertFalse(ok)
+        self.assertIn("no live", reason)
 
     def test_owner_list_is_configurable(self):
         ok, _ = lib.is_authorised(ISSUES[104], _events(104), owners=("chatgpt-bot[bot]",))
@@ -565,28 +574,63 @@ class PollerTests(unittest.TestCase):
             shutil.rmtree(tmp, ignore_errors=True)
 
 
+def _hook_repo() -> str:
+    """A throwaway repo with a copy of the worker scripts.
+
+    Needed because the pre-push hook now runs the diff gate before the ref
+    rules: run in the real project repo, every case would be refused by the
+    gate instead of exercising the rule under test.
+    """
+    path = tempfile.mkdtemp(prefix="t-hook-repo-")
+    shutil.copytree(os.path.join(_ROOT, "scripts"), os.path.join(path, "scripts"),
+                    ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+                    dirs_exist_ok=True)
+
+    def git(*args: str) -> None:
+        subprocess.run(["git", "-C", path, *args], capture_output=True, text=True)
+
+    subprocess.run(["git", "init", "-q", "-b", "main", path], capture_output=True)
+    git("config", "user.email", "worker@example.invalid")
+    git("config", "user.name", "Worker Test")
+    with open(os.path.join(path, "README.md"), "w", encoding="utf-8") as fh:
+        fh.write("base\n")
+    git("add", "-A")
+    git("commit", "-qm", "base")
+    git("update-ref", "refs/remotes/origin/main", "HEAD")
+    return path
+
+
 class PrePushHookTests(unittest.TestCase):
     ZERO = "0" * 40
+
+    def setUp(self):
+        self.repo = _hook_repo()
+
+    def tearDown(self):
+        shutil.rmtree(self.repo, ignore_errors=True)
+
+    def _head(self) -> str:
+        return subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True,
+                              text=True, cwd=self.repo).stdout.strip()
 
     def _run(self, lines, env=None):
         merged = dict(os.environ)
         merged.update(env or {})
         proc = subprocess.run(["sh", HOOK], input=lines, capture_output=True,
-                              text=True, env=merged, cwd=_ROOT)
+                              text=True, env=merged, cwd=self.repo)
         return proc.returncode, proc.stderr
 
     def test_pushing_main_is_refused(self):
-        code, err = self._run("refs/heads/feat abc refs/heads/main def\n")
+        code, err = self._run(f"refs/heads/feat {self._head()} refs/heads/main {self._head()}\n")
         self.assertEqual(code, 1)
         self.assertIn("REFUSING to push to refs/heads/main", err)
 
     def test_pushing_master_is_refused(self):
-        code, _ = self._run("refs/heads/feat abc refs/heads/master def\n")
+        code, _ = self._run(f"refs/heads/feat {self._head()} refs/heads/master {self._head()}\n")
         self.assertEqual(code, 1)
 
     def test_pushing_a_feature_branch_is_allowed(self):
-        base = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True,
-                              text=True, cwd=_ROOT).stdout.strip()
+        base = self._head()
         code, err = self._run(f"refs/heads/x {base} refs/heads/hermes/issue-1-y {base}\n")
         self.assertEqual(code, 0, err)
 
@@ -597,14 +641,12 @@ class PrePushHookTests(unittest.TestCase):
 
     def test_a_force_update_is_refused(self):
         # remote sha is not an ancestor of the local sha -> non-fast-forward
-        code, err = self._run(f"refs/heads/x {self.ZERO if False else 'f' * 40} "
-                              f"refs/heads/hermes/issue-2-y {'a' * 40}\n")
+        code, err = self._run(f"refs/heads/x {'f' * 40} refs/heads/hermes/issue-2-y {'a' * 40}\n")
         self.assertEqual(code, 1)
         self.assertIn("non-fast-forward", err)
 
     def test_the_owner_can_bypass_deliberately(self):
-        head = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True,
-                              text=True, cwd=_ROOT).stdout.strip()
+        head = self._head()
         code, err = self._run(f"refs/heads/main {head} refs/heads/main {head}\n",
                               env={"HERMES_ALLOW_MAIN_PUSH": "1"})
         self.assertEqual(code, 0, err)

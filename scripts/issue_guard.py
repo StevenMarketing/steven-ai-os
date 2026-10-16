@@ -93,25 +93,26 @@ def cmd_claim(args: argparse.Namespace) -> int:
     if not allowed:
         return _fail(reason)
     try:
-        run_id = store.claim(args.issue, ttl=args.ttl)
+        run_id = store.claim(args.issue, ttl=args.ttl, timeout=args.lock_timeout)
     except lib.ClaimError as exc:
         return _fail(str(exc))
+    except lib.LockTimeout as exc:
+        return _fail(str(exc))
     store.append_audit({"event": "claim", "issue": args.issue, "run_id": run_id})
-    store.save()
     print(json.dumps({"issue": args.issue, "run_id": run_id, "ttl": args.ttl}))
     return 0
 
 
 def cmd_finish(args: argparse.Namespace) -> int:
     store = _store(args)
-    store.release(args.issue)
-    store.mark_processed(args.issue, args.outcome, pr=args.pr,
-                         cost=args.cost, note=args.note)
-    usage = store.record_usage(args.cost)
-    store.append_audit({"event": "finish", "issue": args.issue, "outcome": args.outcome,
-                        "pr": args.pr, "cost": args.cost, "usage": usage,
-                        "note": args.note})
-    store.save()
+    with store.transaction(timeout=args.lock_timeout):
+        store._release_unlocked(str(args.issue))
+        store.mark_processed(args.issue, args.outcome, pr=args.pr,
+                             cost=args.cost, note=args.note)
+        usage = store.record_usage(args.cost)
+        store.append_audit({"event": "finish", "issue": args.issue,
+                            "outcome": args.outcome, "pr": args.pr,
+                            "cost": args.cost, "usage": usage, "note": args.note})
     print(json.dumps({"issue": args.issue, "outcome": args.outcome,
                       "usage_today": usage, "remaining": store.remaining_today()},
                      indent=2))
@@ -134,6 +135,128 @@ def cmd_set_pause(args: argparse.Namespace, paused: bool) -> int:
     store.save()
     print(f"worker {'PAUSED' if paused else 'RUNNABLE'} ({store.pause_path})")
     return 0
+
+
+# --------------------------------------------------------------------------
+# Mandatory pre-commit / pre-push gate
+# --------------------------------------------------------------------------
+def _git_lines(cmd: List[str], cwd: Optional[str] = None) -> List[str]:
+    try:
+        out = subprocess.run(["git", *cmd], capture_output=True, text=True,
+                             check=True, cwd=cwd).stdout
+    except (OSError, subprocess.CalledProcessError):
+        return []
+    return [line.strip() for line in out.splitlines() if line.strip()]
+
+
+def repo_root(cwd: Optional[str] = None) -> str:
+    lines = _git_lines(["rev-parse", "--show-toplevel"], cwd)
+    return lines[0] if lines else os.getcwd()
+
+
+def resolve_base(base: str, cwd: Optional[str] = None) -> str:
+    """First revision of (base, origin/main, main, HEAD~1) that exists."""
+    for candidate in (base, "origin/main", "main", "HEAD~1"):
+        if not candidate:
+            continue
+        if _git_lines(["rev-parse", "--verify", "--quiet", f"{candidate}^{{commit}}"],
+                      cwd):
+            return candidate
+    return ""
+
+
+def changed_files(base: str = "origin/main", *, staged: bool = True,
+                  include_untracked: bool = True,
+                  cwd: Optional[str] = None) -> List[str]:
+    """The FINAL state of the change set, including new and staged files.
+
+    Committed range vs ``base`` + the index + (unless disabled) untracked files,
+    so a file that has not been ``git add``-ed yet is still inspected rather than
+    slipping past the gate.
+    """
+    files = set()
+    resolved = resolve_base(base, cwd)
+    if resolved:
+        files.update(_git_lines(["diff", "--name-only", f"{resolved}...HEAD"], cwd))
+    if staged:
+        files.update(_git_lines(["diff", "--cached", "--name-only"], cwd))
+    if include_untracked:
+        files.update(_git_lines(["ls-files", "--others", "--exclude-standard"], cwd))
+    return sorted(files)
+
+
+def cmd_verify_diff(args: argparse.Namespace) -> int:
+    """Protected paths + credentials on the exact diff about to be committed."""
+    root = args.root or repo_root()
+    files = changed_files(args.base, staged=args.staged,
+                          include_untracked=not args.no_untracked, cwd=root)
+    review = lib.review_paths(files)
+    live = _live_values(args.env_file)
+
+    blocking: List[Dict[str, Any]] = []
+    test_context: List[Dict[str, Any]] = []
+    for path in files:
+        full = os.path.join(root, path)
+        if not os.path.isfile(full):
+            continue
+        try:
+            with open(full, "r", encoding="utf-8", errors="replace") as fh:
+                text = fh.read()
+        except OSError:
+            continue
+        rows = lib.scan_secrets(text, path) + lib.scan_against_live_values(text, live, path)
+        for row in rows:
+            (blocking if row["context"] in ("REVIEW", "BLOCK") else test_context).append(row)
+
+    protected = review["blocked"]
+    allow_protected = bool(os.environ.get("HERMES_ALLOW_PROTECTED"))
+    payload = {
+        "base": resolve_base(args.base, root) or "(no base found)",
+        "root": root,
+        "checked_files": len(files),
+        "files": files,
+        "protected_paths": protected,
+        "secret_findings_blocking": blocking,
+        "secret_findings_test_context": test_context,
+        "protected_bypass": allow_protected,
+    }
+    print(json.dumps(payload, indent=2))
+
+    if blocking:
+        print("\nREFUSED: a real credential-shaped value is in this diff "
+              "(secrets can never be bypassed)")
+        return 1
+    if protected and not allow_protected:
+        print("\nREFUSED: protected paths are part of this diff and need a human:")
+        for row in protected:
+            print(f"  {row['path']}  <- {row['reason']}")
+        print("  Owner maintenance only: re-run with HERMES_ALLOW_PROTECTED=1")
+        return 1
+    if protected:
+        print(f"\nWARNING: {len(protected)} protected path(s) changed and "
+              "HERMES_ALLOW_PROTECTED=1 was set - owner maintenance bypass in use")
+    print(f"\nverified {len(files)} file(s): no blocking secret, path policy satisfied")
+    return 0
+
+
+def cmd_with_lock(args: argparse.Namespace) -> int:
+    """Run a command while holding the global single-worker lock."""
+    store = _store(args)
+    lock = store.worker_lock(timeout=args.timeout)
+    if not lock.acquire():
+        print(f"REFUSED: another worker holds {store.lock_path} "
+              f"(waited {args.timeout}s)")
+        return 1
+    command = list(args.command or [])
+    if command and command[0] == "--":
+        command = command[1:]
+    try:
+        print(f"lock held: {store.lock_path} (timeout {args.timeout}s)")
+        if not command:
+            return 0
+        return subprocess.run(command).returncode
+    finally:
+        lock.release()
 
 
 # --------------------------------------------------------------------------
@@ -168,21 +291,33 @@ def _iter_text_files(root: str) -> List[str]:
 
 
 def _live_values(env_file: Optional[str]) -> Dict[str, str]:
-    """Real credentials, for an exact-substring check. Never printed."""
+    """Real credentials, for an exact-substring check. Never printed.
+
+    Both the process environment AND the env file are watched: a rotated token
+    often lives in one but not the other, and a single-value slot would silently
+    stop checking the other one.
+    """
     watch = ("OPENROUTER_API_KEY", "TELEGRAM_BOT_TOKEN", "API_SERVER_KEY", "GITHUB_TOKEN")
     values: Dict[str, str] = {}
-    for name in watch:
-        value = os.environ.get(name, "")
-        if value and len(value) >= 12:
+
+    def remember(name: str, raw: str) -> None:
+        value = (raw or "").strip().strip("'\"")
+        if not value or len(value) < 12:
+            return
+        if name not in values:
             values[name] = value
+        elif values[name] != value:
+            values[f"{name}#2"] = value
+
+    for name in watch:
+        remember(name, os.environ.get(name, ""))
     if env_file and os.path.isfile(env_file):
         try:
             with open(env_file, "r", encoding="utf-8", errors="replace") as fh:
                 for line in fh:
-                    key, _, value = line.strip().partition("=")
-                    key = key.strip()
-                    if key in watch and len(value.strip().strip("'\"")) >= 12:
-                        values[key] = value.strip().strip("'\"")
+                    key, _, raw = line.strip().partition("=")
+                    if key.strip() in watch:
+                        remember(key.strip(), raw)
         except OSError:
             pass
     return values
@@ -223,7 +358,9 @@ def build_parser() -> argparse.ArgumentParser:
                                      allow_abbrev=False)
     parser.add_argument("--state",
                         default=os.path.join(lib.default_state_dir(), "state.json"))
-    sub = parser.add_subparsers(dest="command", required=True)
+    parser.add_argument("--lock-timeout", type=float, default=10.0,
+                        help="seconds to wait for the inter-process worker lock")
+    sub = parser.add_subparsers(dest="command_", required=False)
 
     sub.add_parser("status", help="show limits, pause switch, usage, claims")
     sub.add_parser("pending", help="alias for status")
@@ -270,6 +407,23 @@ def build_parser() -> argparse.ArgumentParser:
                    default=os.path.join(os.environ.get("HERMES_HOME", "/opt/data"), ".env"))
     p.set_defaults(func=cmd_check_secrets)
 
+    p = sub.add_parser("verify-diff",
+                       help="MANDATORY gate: protected paths + credentials on the "
+                            "final diff (staged, committed and new files)")
+    p.add_argument("--base", default="origin/main")
+    p.add_argument("--staged", action="store_true", default=True)
+    p.add_argument("--no-untracked", action="store_true")
+    p.add_argument("--root")
+    p.add_argument("--env-file",
+                   default=os.path.join(os.environ.get("HERMES_HOME", "/opt/data"), ".env"))
+    p.set_defaults(func=cmd_verify_diff)
+
+    p = sub.add_parser("with-lock",
+                       help="run a command while holding the global worker lock")
+    p.add_argument("--timeout", type=float, default=0.0)
+    p.add_argument("command", nargs=argparse.REMAINDER)
+    p.set_defaults(func=cmd_with_lock)
+
     sub.choices["status"].set_defaults(func=cmd_status)
     sub.choices["pending"].set_defaults(func=cmd_status)
     return parser
@@ -277,6 +431,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Optional[List[str]] = None) -> int:
     args = build_parser().parse_args(argv)
+    if not getattr(args, "func", None):
+        return _fail("no subcommand given (try: status, can-start, claim, finish, "
+                     "verify-diff, with-lock, check-paths, check-secrets, pause, "
+                     "resume, reclaim)")
     return int(args.func(args))
 
 

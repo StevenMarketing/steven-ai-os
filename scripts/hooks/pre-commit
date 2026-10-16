@@ -1,0 +1,35 @@
+#!/usr/bin/env sh
+# Steven AI OS — MANDATORY gate before every commit.
+#
+# Runs scripts/issue_guard.py verify-diff, which inspects the FINAL state of the
+# change set -- committed range vs base, the index, and untracked files (so a new
+# file cannot slip through before it is staged) -- and refuses:
+#
+#   1. any real credential in those files (exact match against the live values in
+#      the environment/.env, plus credential shapes) -- NEVER bypassable; and
+#   2. any protected path (.env, secrets, auth, security, workflows, the guard
+#      scripts and tests themselves).
+#
+# Owner-only maintenance escape hatch (loud, and recorded in the hook output):
+#     HERMES_ALLOW_PROTECTED=1 git commit ...
+# It lifts ONLY the protected-path rule; the secret check still runs.
+
+set -u
+
+ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
+[ -n "$ROOT" ] || exit 0
+[ -f "$ROOT/scripts/issue_guard.py" ] || exit 0
+
+PY="${PYTHON:-}"
+if [ -z "$PY" ] || [ ! -x "$PY" ]; then
+    if [ -x /opt/hermes/.venv/bin/python ]; then
+        PY=/opt/hermes/.venv/bin/python
+    else
+        PY=python3
+    fi
+fi
+
+exec "$PY" "$ROOT/scripts/issue_guard.py" verify-diff \
+    --base "${HERMES_DIFF_BASE:-origin/main}" \
+    --staged \
+    --root "$ROOT"

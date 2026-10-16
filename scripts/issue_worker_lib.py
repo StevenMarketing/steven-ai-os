@@ -18,7 +18,13 @@ import os
 import re
 import tempfile
 import time
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from contextlib import contextmanager
+from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
+
+try:  # POSIX file locking; the worker is Linux-only by design
+    import fcntl
+except ImportError:  # pragma: no cover - non-POSIX fallback
+    fcntl = None  # type: ignore[assignment]
 
 # --------------------------------------------------------------------------
 # Labels / vocabulary
@@ -81,9 +87,12 @@ PROTECTED_PATTERNS: Tuple[str, ...] = (
     "scripts/issue_poller.py",
     "scripts/issue_guard.py",
     "scripts/issue_worker_lib.py",
+    "scripts/issue_github.py",
+    "scripts/issue_pr.py",
     "scripts/hooks/**",
     "scripts/cron/**",
     "tests/test_issue_worker.py",
+    "tests/test_issue_worker_hardening.py",
     "tests/fixtures/github_issues.json",
     "docs/GITHUB-WORKER.md",
 )
@@ -211,38 +220,65 @@ def label_names(issue: Dict[str, Any]) -> List[str]:
     return out
 
 
+def timeline_events(events: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Events oldest-first. Sorted by ``created_at`` when every event has one."""
+    items = [event for event in (events or []) if isinstance(event, dict)]
+    if items and all(event.get("created_at") for event in items):
+        return sorted(items, key=lambda event: str(event.get("created_at")))
+    return items
+
+
+def label_state(events: Iterable[Dict[str, Any]],
+                label: str = LABEL_READY) -> Dict[str, Any]:
+    """Who currently holds ``label``, replaying the timeline properly.
+
+    The label must be *live*: an approval that was later removed and re-applied
+    by somebody else does not carry the original owner's authority. Historical
+    label events that are no longer in effect are therefore ignored, and a
+    missing timeline yields no approval at all (fail-closed).
+    """
+    present = False
+    by: Optional[str] = None
+    for event in timeline_events(events):
+        if ((event.get("label") or {}).get("name")) != label:
+            continue
+        kind = str(event.get("event") or "")
+        if kind == "labeled":
+            present = True
+            by = (event.get("actor") or {}).get("login")
+            by = str(by) if by else None
+        elif kind == "unlabeled":
+            present = False
+            by = None
+    return {"present": present, "by": by}
+
+
 def approval_actor(events: Iterable[Dict[str, Any]],
                    label: str = LABEL_READY) -> Optional[str]:
-    """Login that most recently applied ``label``, or None."""
-    actor: Optional[str] = None
-    for event in events or []:
-        if str(event.get("event")) != "labeled":
-            continue
-        applied = ((event.get("label") or {}).get("name"))
-        if applied != label:
-            continue
-        login = (event.get("actor") or {}).get("login")
-        if login:
-            actor = str(login)
-    return actor
+    """Login that currently holds ``label``, or None."""
+    return label_state(events, label)["by"]
 
 
 def is_authorised(issue: Dict[str, Any], events: Iterable[Dict[str, Any]],
                   owners: Sequence[str] = (DEFAULT_OWNER,)) -> Tuple[bool, str]:
-    """The gate: the ``hermes-ready`` label must have been applied by an owner.
+    """The gate: ``hermes-ready`` must be *live* and applied by an owner.
 
     ``hermes-proposed`` alone never activates anything -- an agent or bot may
-    create and label a proposal, but only a human owner's approval counts.
+    create and label a proposal, but only a human owner's approval counts. A
+    label whose timeline was removed, or whose timeline is unavailable, is
+    refused rather than trusted.
     """
     labels = label_names(issue)
     if LABEL_READY not in labels:
         return False, f"missing label {LABEL_READY}"
-    actor = approval_actor(events)
-    if actor is None:
-        return False, f"no {LABEL_READY} label event found"
-    if actor not in tuple(owners):
-        return False, f"{LABEL_READY} was applied by {actor!r}, not an owner"
-    return True, f"approved by {actor}"
+    state = label_state(events)
+    if not state["present"]:
+        return False, f"no live {LABEL_READY} approval in the issue timeline"
+    if state["by"] is None:
+        return False, f"{LABEL_READY} approval has no recorded actor"
+    if state["by"] not in tuple(owners):
+        return False, f"{LABEL_READY} was applied by {state['by']!r}, not an owner"
+    return True, f"approved by {state['by']}"
 
 
 def eligibility(issue: Dict[str, Any], events: Iterable[Dict[str, Any]],
@@ -373,6 +409,60 @@ class ClaimError(RuntimeError):
     """Raised when an issue is already claimed by a live worker."""
 
 
+class LockTimeout(RuntimeError):
+    """Another process held the worker lock for longer than the timeout."""
+
+
+class InterProcessLock:
+    """Exclusive advisory lock shared by every worker process.
+
+    Uses ``fcntl.flock`` on a lock file, so two overlapping cron ticks (or a
+    cron tick plus a manual run) cannot enter the same critical section. The
+    kernel drops the lock when the holder dies, so a crashed worker can never
+    wedge it permanently.
+    """
+
+    def __init__(self, path: str, timeout: float = 10.0, poll: float = 0.05) -> None:
+        self.path = path
+        self.timeout = timeout
+        self.poll = poll
+        self._fd: Optional[int] = None
+
+    def acquire(self) -> bool:
+        os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
+        fd = os.open(self.path, os.O_CREAT | os.O_RDWR, 0o644)
+        deadline = time.time() + max(0.0, float(self.timeout))
+        while True:
+            try:
+                if fcntl is not None:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                self._fd = fd
+                return True
+            except OSError:
+                if time.time() >= deadline:
+                    os.close(fd)
+                    return False
+                time.sleep(self.poll)
+
+    def release(self) -> None:
+        if self._fd is None:
+            return
+        fd, self._fd = self._fd, None
+        try:
+            if fcntl is not None:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+
+    def __enter__(self) -> "InterProcessLock":
+        if not self.acquire():
+            raise LockTimeout(f"another worker holds {self.path}")
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        self.release()
+
+
 def default_state_dir() -> str:
     home = os.environ.get("HERMES_HOME") or os.path.expanduser("~/.hermes")
     return os.path.join(home, "ops", "github-worker")
@@ -450,41 +540,148 @@ class StateStore:
             "note": note,
         }
 
+    # -- inter-process locking ---------------------------------------------
+    @property
+    def lock_path(self) -> str:
+        return os.path.join(self.dir, "worker.lock")
+
+    @property
+    def claims_dir(self) -> str:
+        return os.path.join(self.dir, "claims")
+
+    def claim_path(self, issue: Any) -> str:
+        return os.path.join(self.claims_dir, f"issue-{issue}.lock")
+
+    @contextmanager
+    def transaction(self, timeout: float = 10.0) -> Iterator["StateStore"]:
+        """Exclusive, reload-then-mutate-then-save critical section."""
+        with InterProcessLock(self.lock_path, timeout=timeout):
+            self.data = self._load()
+            yield self
+            self.save()
+
+    def worker_lock(self, timeout: float = 0.0) -> InterProcessLock:
+        """Global single-worker lock (for wrapping a whole worker run)."""
+        lock = InterProcessLock(self.lock_path, timeout=timeout)
+        return lock
+
     # -- claims ------------------------------------------------------------
     def claim(self, issue: Any, ttl: int = CLAIM_TTL_SECONDS,
-              run_id: Optional[str] = None) -> str:
-        stale = self.stale_claims()
+              run_id: Optional[str] = None, timeout: float = 10.0) -> str:
+        """Atomic, expiring, cross-process claim.
+
+        Three independent guards, so no two workers can hold the same issue even
+        when two cron ticks overlap:
+
+        1. an ``O_EXCL`` marker file -- atomic in the kernel, no lock needed;
+        2. the flock'd ledger, reloaded inside the critical section;
+        3. the TTL, so a crashed worker's claim is reclaimable.
+        """
         key = str(issue)
-        live = self.data["claims"].get(key)
-        if live and key not in stale:
-            raise ClaimError(
-                f"issue {key} already claimed by run {live.get('run_id')} "
-                f"at {live.get('claimed_at')}")
-        run = run_id or hashlib.sha256(
-            f"{key}:{self._clock()}".encode()).hexdigest()[:12]
-        self.data["claims"][key] = {
-            "run_id": run,
-            "claimed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(self._clock())),
-            "expires_at": self._clock() + ttl,
-        }
+        run = run_id or hashlib.sha256(f"{key}:{self._clock()}".encode()).hexdigest()[:12]
+        expires_at = self._clock() + max(1, int(ttl))
+        with InterProcessLock(self.lock_path, timeout=timeout):
+            self.data = self._load()
+            marker = self.claim_path(key)
+            ledger = self.data["claims"].get(key)
+            if (ledger and float(ledger.get("expires_at", 0)) > self._clock()) \
+                    or self.marker_is_fresh(marker):
+                held_by = (ledger or self.read_marker(marker) or {}).get("run_id")
+                raise ClaimError(
+                    f"issue {key} is already claimed by run {held_by} "
+                    f"(expires at {int(expires_at - max(1, int(ttl)) + ttl)})")
+            if os.path.exists(marker):          # stale marker: take it over
+                os.unlink(marker)
+            os.makedirs(self.claims_dir, exist_ok=True)
+            payload = json.dumps({"run_id": run, "expires_at": expires_at,
+                                  "claimed_at": time.strftime(
+                                      "%Y-%m-%dT%H:%M:%SZ", time.gmtime(self._clock()))})
+            try:
+                fd = os.open(marker, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+            except FileExistsError as exc:      # lost the atomic race
+                raise ClaimError(
+                    f"issue {key} was claimed by another process at the same instant"
+                ) from exc
+            try:
+                os.write(fd, payload.encode("utf-8"))
+            finally:
+                os.close(fd)
+            self.data["claims"][key] = {"run_id": run,
+                                        "claimed_at": json.loads(payload)["claimed_at"],
+                                        "expires_at": expires_at}
+            self.save()
         return run
 
-    def release(self, issue: Any) -> None:
-        self.data["claims"].pop(str(issue), None)
+    def release(self, issue: Any, timeout: float = 10.0) -> None:
+        key = str(issue)
+        with InterProcessLock(self.lock_path, timeout=timeout):
+            self.data = self._load()
+            self._release_unlocked(key)
+            self.save()
+
+    def _release_unlocked(self, key: str) -> None:
+        """Drop a claim while the caller already holds the worker lock.
+
+        Never called directly by a process that has not taken ``lock_path``:
+        ``flock`` is per open file description, so a nested acquisition in the
+        same process would block until the timeout.
+        """
+        self.data["claims"].pop(str(key), None)
+        marker = self.claim_path(str(key))
+        if os.path.exists(marker):
+            os.unlink(marker)
+
+    def read_marker(self, path: str) -> Optional[Dict[str, Any]]:
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+            return data if isinstance(data, dict) else None
+        except (OSError, ValueError):
+            return None
+
+    def marker_is_fresh(self, path: str) -> bool:
+        marker = self.read_marker(path)
+        if not marker:
+            return False
+        try:
+            return float(marker.get("expires_at", 0)) > self._clock()
+        except (TypeError, ValueError):
+            return False
+
+    def marker_issues(self) -> List[str]:
+        try:
+            names = os.listdir(self.claims_dir)
+        except OSError:
+            return []
+        out = []
+        for name in names:
+            if name.startswith("issue-") and name.endswith(".lock"):
+                out.append(name[len("issue-"):-len(".lock")])
+        return sorted(out)
 
     def stale_claims(self, ttl: int = CLAIM_TTL_SECONDS) -> List[str]:
+        """Issues whose claim is no longer live (ledger or marker)."""
         now = self._clock()
-        out = []
+        keys = set()
         for key, claim in self.data["claims"].items():
-            expires = claim.get("expires_at")
-            if expires is None or float(expires) <= now:
-                out.append(key)
-        return sorted(out)
+            try:
+                expires = float(claim.get("expires_at", 0))
+            except (TypeError, ValueError):
+                expires = 0.0
+            if expires <= now:
+                keys.add(key)
+        for key in self.marker_issues():
+            if not self.marker_is_fresh(self.claim_path(key)):
+                keys.add(key)
+        return sorted(keys)
 
     def reclaim_stale(self) -> List[str]:
         stale = self.stale_claims()
         for key in stale:
             self.data["claims"].pop(key, None)
+            marker = self.claim_path(key)
+            if os.path.exists(marker):
+                os.unlink(marker)
         return stale
 
     # -- budget ------------------------------------------------------------

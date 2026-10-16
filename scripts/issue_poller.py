@@ -25,33 +25,12 @@ import json
 import os
 import re
 import sys
-import urllib.error
-import urllib.parse
-import urllib.request
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+import issue_github as gh  # noqa: E402
 import issue_worker_lib as lib  # noqa: E402
-
-API_ROOT = "https://api.github.com"
-USER_AGENT = "steven-ai-os-issue-worker/1.0"
-TIMEOUT = 30
-
-
-# --------------------------------------------------------------------------
-# Live API
-# --------------------------------------------------------------------------
-def _request(path: str, token: str) -> Any:
-    url = path if path.startswith("http") else API_ROOT + path
-    request = urllib.request.Request(url, headers={
-        "Accept": "application/vnd.github+json",
-        "Authorization": f"Bearer {token}",
-        "X-GitHub-Api-Version": "2022-11-28",
-        "User-Agent": USER_AGENT,
-    })
-    with urllib.request.urlopen(request, timeout=TIMEOUT) as response:
-        return json.loads(response.read().decode("utf-8"))
 
 
 def read_token(token_file: Optional[str]) -> str:
@@ -114,22 +93,21 @@ def _validated(token: str) -> str:
     return token
 
 
-def fetch_live(repo: str, token: str, label: str) -> Tuple[List[Dict[str, Any]],
-                                                           Dict[str, List[Dict[str, Any]]]]:
-    query = urllib.parse.urlencode({"state": "open", "labels": label, "per_page": 50})
-    issues = _request(f"/repos/{repo}/issues?{query}", token)
-    # The issues endpoint also returns pull requests -- drop them.
-    issues = [i for i in issues if "pull_request" not in i]
+def fetch_live(repo: str, token: str, label: str,
+               transport: Optional[gh.Transport] = None) -> Tuple[
+                   List[Dict[str, Any]], Dict[str, List[Dict[str, Any]]]]:
+    """Every open issue carrying ``label`` plus its FULL event timeline.
+
+    Both collections are paginated. Any API failure propagates: a failed read
+    must never look like "this issue has no approval" or "there is no work",
+    because that would be fail-open on a security decision.
+    """
+    issues = gh.list_issues(repo, token, label, transport=transport)
     events: Dict[str, List[Dict[str, Any]]] = {}
     for issue in issues:
         number = issue.get("number")
-        try:
-            events[str(number)] = _request(
-                f"/repos/{repo}/issues/{number}/events?per_page=100", token)
-        except urllib.error.HTTPError as exc:  # events are best-effort
-            events[str(number)] = []
-            print(f"warning: cannot read events for #{number}: HTTP {exc.code}",
-                  file=sys.stderr)
+        events[str(number)] = gh.list_issue_events(repo, number, token,
+                                                   transport=transport)
     return issues, events
 
 
@@ -200,12 +178,18 @@ def main(argv: Optional[List[str]] = None) -> int:
         issues, events = load_fixture(args.fixture)
     else:
         try:
-            issues, events = fetch_live(args.repo, read_token(args.token_file), args.label)
-        except urllib.error.HTTPError as exc:
-            print(f"GitHub API error: HTTP {exc.code}", file=sys.stderr)
+            issues, events = fetch_live(args.repo, read_token(args.token_file),
+                                        args.label)
+        except gh.RateLimited as exc:
+            print(f"GitHub rate limited: {exc}", file=sys.stderr)
+            if args.watch:
+                print("status=rate-limited")
             return 3
-        except urllib.error.URLError as exc:
-            print(f"GitHub API unreachable: {exc.reason}", file=sys.stderr)
+        except gh.GitHubError as exc:
+            print(f"GitHub API failure (fail-closed, no work assumed): {exc}",
+                  file=sys.stderr)
+            if args.watch:
+                print("status=unavailable")
             return 3
 
     result = collect(issues, events, owners, state, args.label)
