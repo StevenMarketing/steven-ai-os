@@ -147,6 +147,27 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                              f"${state['local_ledger_usd']:.4f}."),
                      state_dir=args.state_dir)
 
+    # Mốc 80% / 100% phải báo được **kể cả khi không có issue nào** (worker chỉ chạy khi
+    # có việc). notify.py khử trùng theo ngày nên chạy mỗi phút không spam.
+    if args.notify:
+        try:
+            import notify as notify_mod
+            thresholds = notify_mod.crossed_thresholds(guard, state_dir=args.state_dir)
+            state["thresholds"] = {"spend_usd": thresholds["spend_usd"],
+                                   "cap_usd": thresholds["cap_usd"],
+                                   "pending": [p["label"] for p in thresholds["pending"]],
+                                   "sent": []}
+            for item in thresholds["pending"]:
+                text = notify_mod.build_message(
+                    "budget", spend=thresholds["spend_usd"], cap=thresholds["cap_usd"],
+                    detail=f"Mốc {int(item['threshold'] * 100)}% đã vượt.")
+                outcome = notify_mod.send(text)
+                if outcome.get("ok"):
+                    notify_mod.mark_notified(item["label"], args.state_dir)
+                    state["thresholds"]["sent"].append(item["label"])
+        except Exception as exc:                              # noqa: BLE001
+            state["thresholds"] = {"error": type(exc).__name__}
+
     if args.json:
         print(json.dumps(state, indent=2, sort_keys=True, default=str))
     else:
