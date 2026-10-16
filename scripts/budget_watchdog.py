@@ -56,6 +56,21 @@ def _notify(event: str, detail: str = "", spend: Optional[float] = None,
         return {"ok": False, "error": type(exc).__name__}
 
 
+def _notify_once(label: str, event: str, detail: str = "",
+                 state_dir: Optional[str] = None) -> Dict[str, Any]:
+    """Như `_notify` nhưng mỗi nhãn chỉ gửi tối đa một lần mỗi ngày."""
+    try:
+        import notify
+        if label in notify.notified_today(state_dir)["sent"]:
+            return {"ok": True, "skipped": "already notified today"}
+        result = _notify(event, detail=detail)
+        if result.get("ok"):
+            notify.mark_notified(label, state_dir)
+        return result
+    except Exception as exc:                                  # noqa: BLE001
+        return {"ok": False, "error": type(exc).__name__}
+
+
 def evaluate(guard: Optional[budget.BudgetGuard] = None,
              provider: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Quyết định watchdog (không tác dụng phụ).
@@ -88,8 +103,15 @@ def evaluate(guard: Optional[budget.BudgetGuard] = None,
 
 
 def enforce(guard: budget.BudgetGuard, job_id: str) -> Dict[str, Any]:
+    """Pause worker. ``state_changed`` cho biết đây là lần chuyển trạng thái đầu tiên.
+
+    Chỉ thông báo khi trạng thái **đổi**, nếu không thì một watchdog chạy mỗi phút
+    sẽ gửi một tin mỗi phút.
+    """
+    was_paused = guard.is_paused()
     guard.set_paused(True, f"ngân sách ngày đã chạm trần ${guard.daily_usd:.2f}")
-    result = {"guard_paused": guard.pause_path, "cron": None}
+    result: Dict[str, Any] = {"guard_paused": guard.pause_path, "cron": None,
+                              "state_changed": not was_paused}
     listing = _hermes("cron", "list")
     if job_id and job_id in (listing.get("stdout") or ""):
         result["cron"] = _hermes("cron", "pause", job_id)
@@ -115,13 +137,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if state["over_cap"] and args.enforce:
         state["action"] = enforce(guard, args.job_id)
         state["acted"] = True
-        if args.notify:
+        if args.notify and state["action"].get("state_changed", True):
             _notify("budget", detail="Watchdog đã pause worker vì chạm trần ngày.",
                     spend=state["spend_today_usd"], cap=state["daily_cap_usd"])
     elif state["unreadable_provider"] and args.notify:
-        _notify("worker_error",
-                detail=("Không đọc được số provider; watchdog chỉ còn sổ cái cục bộ "
-                        f"${state['local_ledger_usd']:.4f}."))
+        # Chỉ báo một lần mỗi ngày: watchdog chạy mỗi phút, nếu không sẽ spam.
+        _notify_once("provider-unreadable", "worker_error",
+                     detail=("Không đọc được số provider; watchdog chỉ còn sổ cái cục bộ "
+                             f"${state['local_ledger_usd']:.4f}."),
+                     state_dir=args.state_dir)
 
     if args.json:
         print(json.dumps(state, indent=2, sort_keys=True, default=str))
