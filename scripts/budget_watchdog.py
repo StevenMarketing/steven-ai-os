@@ -107,14 +107,25 @@ def enforce(guard: budget.BudgetGuard, job_id: str) -> Dict[str, Any]:
 
     Chỉ thông báo khi trạng thái **đổi**, nếu không thì một watchdog chạy mỗi phút
     sẽ gửi một tin mỗi phút.
+
+    Job của worker có thể nằm ở **profile riêng** (`worker-agent`), nên phải pause ở
+    **đúng profile đó** — pause ở profile mặc định sẽ không dừng gì cả. Cả hai nơi đều
+    được thử và kết quả được ghi lại để không "im lặng thành công".
     """
     was_paused = guard.is_paused()
     guard.set_paused(True, f"ngân sách ngày đã chạm trần ${guard.daily_usd:.2f}")
     result: Dict[str, Any] = {"guard_paused": guard.pause_path, "cron": None,
+                              "cron_default": None, "cron_worker_profile": None,
                               "state_changed": not was_paused}
+    profile = os.environ.get("STEVEN_WORKER_PROFILE", "worker-agent")
     listing = _hermes("cron", "list")
     if job_id and job_id in (listing.get("stdout") or ""):
         result["cron"] = _hermes("cron", "pause", job_id)
+        result["cron_default"] = result["cron"]
+    if job_id and profile:
+        worker_listing = _hermes("-p", profile, "cron", "list")
+        if job_id in (worker_listing.get("stdout") or ""):
+            result["cron_worker_profile"] = _hermes("-p", profile, "cron", "pause", job_id)
     return result
 
 

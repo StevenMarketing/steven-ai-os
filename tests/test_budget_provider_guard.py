@@ -296,8 +296,8 @@ class MultiKeyTests(unittest.TestCase):
         self.assertEqual(roles["chat"]["limit_usd"], 10)
 
     def test_a_missing_worker_key_falls_back_to_the_single_chat_key(self):
-        budget.read_env_value = lambda name, *a, **k: (
-            {"OPENROUTER_API_KEY": "chat-secret-value"}.get(name))
+        budget.read_env_value = lambda name, path=None, *a, **k: (
+            "chat-secret-value" if name == "OPENROUTER_API_KEY" and path is None else None)
         info = budget.provider_usage()
         self.assertEqual(info["keys_read"], ["chat"])
         self.assertAlmostEqual(info["usage_daily_usd"], 2.0, places=6)
@@ -352,6 +352,58 @@ class MultiKeyTests(unittest.TestCase):
                            "worker": budget.worker_key_usage()})
         for leaked in ("worker-secret-value", "chat-secret-value", "sk-or-v1"):
             self.assertNotIn(leaked, blob)
+
+
+class WorkerProfileTests(unittest.TestCase):
+    """Profile `worker-agent`: khoá riêng + watchdog phải pause job ở ĐÚNG profile."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="wg-prof-")
+        self.budget_dir = os.path.join(self.tmp, "budget")
+        self.previous_env = budget.read_env_value
+
+    def tearDown(self):
+        budget.read_env_value = self.previous_env
+
+    def test_the_worker_profile_env_file_is_used_without_any_env_var(self):
+        os.environ.pop("STEVEN_WORKER_ENV_FILE", None)
+        seen = []
+
+        def reader(name, path=None, *a, **k):
+            if name != "OPENROUTER_API_KEY":
+                return None
+            seen.append(path)
+            return "worker-secret-value" if path else "chat-secret-value"
+
+        budget.read_env_value = reader
+        info = budget.provider_usage()
+        self.assertEqual(info["keys_read"], ["worker", "chat"])
+        self.assertIn("/opt/data/profiles/worker-agent/.env", seen)
+        blob = json.dumps(info)
+        self.assertNotIn("worker-secret-value", blob)
+        self.assertNotIn("chat-secret-value", blob)
+
+    def test_enforce_pauses_the_job_in_the_worker_profile(self):
+        calls = []
+
+        def fake_hermes(*args):
+            calls.append(tuple(args))
+            if args[:2] == ("-p", "worker-agent") and args[2:] == ("cron", "list"):
+                return {"returncode": 0, "stdout": "JOB123 present in worker-agent"}
+            if args == ("cron", "list"):
+                return {"returncode": 0, "stdout": "(no jobs in default profile)"}
+            return {"returncode": 0, "stdout": "ok"}
+
+        original = budget_watchdog._hermes
+        budget_watchdog._hermes = fake_hermes
+        self.addCleanup(setattr, budget_watchdog, "_hermes", original)
+        guard = budget.BudgetGuard(self.budget_dir)
+        guard.record("issue-1", 3.2)
+        action = budget_watchdog.enforce(guard, "JOB123")
+        self.assertIn(("-p", "worker-agent", "cron", "pause", "JOB123"), calls)
+        self.assertIsNone(action["cron_default"])              # không có job ở profile mặc định
+        self.assertIsNotNone(action["cron_worker_profile"])    # đã pause ở worker-agent
+        self.assertTrue(guard.is_paused())
 
 
 if __name__ == "__main__":

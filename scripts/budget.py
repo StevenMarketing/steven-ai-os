@@ -334,7 +334,8 @@ def provider_usage(token: Optional[str] = None, transport: Optional[Transport] =
         return _parse_provider_payload(payload, source="provider-file")
     if token is None and transport is None and env_file is None:
         parts: List[Dict[str, Any]] = []
-        worker_file = os.environ.get("STEVEN_WORKER_ENV_FILE")
+        worker_file = (os.environ.get("STEVEN_WORKER_ENV_FILE")
+                       or "/opt/data/profiles/worker-agent/.env")
         for role, name in KEY_ROLES:
             if role == "worker":
                 # Khoá worker có thể nằm ở biến riêng, hoặc trong .env của profile worker
