@@ -251,5 +251,21 @@ class DeliveryLedgerTests(unittest.TestCase):
                             os.path.join(budget.default_state_dir(), "notify-delivery.jsonl"))
 
 
+class NotifyProfileTests(unittest.TestCase):
+    """Thông báo phải gửi qua profile có kênh Telegram thật (mặc định), không phải profile worker."""
+
+    def test_the_default_target_profile_is_default(self):
+        os.environ.pop("STEVEN_NOTIFY_PROFILE", None)
+        self.assertEqual(notify._hermes_cmd("-t", "telegram", "x"),
+                         ["hermes", "-p", "default", "send", "-t", "telegram", "x"])
+
+    def test_the_profile_can_be_changed_and_current_restores_the_old_behaviour(self):
+        os.environ["STEVEN_NOTIFY_PROFILE"] = "worker-agent"
+        self.addCleanup(os.environ.pop, "STEVEN_NOTIFY_PROFILE", None)
+        self.assertEqual(notify._hermes_cmd("x")[:3], ["hermes", "-p", "worker-agent"])
+        os.environ["STEVEN_NOTIFY_PROFILE"] = "current"
+        self.assertEqual(notify._hermes_cmd("x"), ["hermes", "send", "x"])
+
+
 if __name__ == "__main__":
     unittest.main()
