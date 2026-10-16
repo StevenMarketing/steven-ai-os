@@ -1,0 +1,33 @@
+{
+  "_comment": "Ready-to-apply branch ruleset for main. NOT applied automatically: GitHub rulesets on a PRIVATE repository require GitHub Pro/Team (verified against GitHub docs: 'Rulesets are available in public repositories with GitHub Free ... and in public and private repositories with GitHub Pro, GitHub Team, and GitHub Enterprise Cloud'). On the current plan this file is documentation only - main is protected by scripts/hooks/pre-push instead.",
+  "_how_to_apply_if_the_plan_changes": [
+    "GitHub UI: Settings > Rules > Rulesets > New ruleset > Import a ruleset, paste this file.",
+    "API: POST https://api.github.com/repos/StevenMarketing/steven-ai-os/rulesets with this body (needs Administration: write, which this project deliberately does not grant the worker)."
+  ],
+  "name": "protect-main",
+  "target": "branch",
+  "enforcement": "active",
+  "conditions": {
+    "ref_name": {
+      "include": ["refs/heads/main"],
+      "exclude": []
+    }
+  },
+  "rules": [
+    { "type": "deletion" },
+    { "type": "non_fast_forward" },
+    {
+      "type": "pull_request",
+      "parameters": {
+        "required_approving_review_count": 1,
+        "dismiss_stale_reviews_on_push": true,
+        "require_code_owner_review": false,
+        "require_last_push_approval": false,
+        "required_review_thread_resolution": false
+      }
+    }
+  ],
+  "bypass_actors": [
+    { "actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "always" }
+  ]
+}

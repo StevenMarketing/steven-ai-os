@@ -1,0 +1,70 @@
+name: Hermes task
+description: A task for the Hermes worker. It only runs once the owner applies the hermes-ready label.
+title: "[hermes] "
+labels: ["hermes-proposed"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **This issue does not activate anything by itself.**
+        It is tagged `hermes-proposed`; the repository owner must apply the
+        `hermes-ready` label to approve execution. All five sections below are
+        required — the worker rejects an incomplete task instead of guessing.
+
+        Do not paste credentials, tokens or customer data into this issue.
+  - type: textarea
+    id: goal
+    attributes:
+      label: Goal
+      description: One to three sentences. What must be true when this is finished?
+      placeholder: "Show the shop's ZIP code next to the city in the sync status widget."
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope
+      description: What may change, and what must not change?
+      placeholder: "Only web/app.js and web/styles.css. No API field changes."
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: A checklist that a reviewer can verify without reading the code.
+      placeholder: |
+        - The widget renders a ZIP column.
+        - A location without a ZIP renders an em dash.
+    validations:
+      required: true
+  - type: textarea
+    id: tests
+    attributes:
+      label: Tests required
+      description: Which tests must be added or run? The full suite must stay green.
+      placeholder: "Extend tests/test_web_ui.py; run the full suite."
+    validations:
+      required: true
+  - type: textarea
+    id: constraints
+    attributes:
+      label: Constraints
+      description: Hard limits for this task (no deploy, no Google calls, no migration, ...).
+      placeholder: "No Google calls, no publish, no new dependency, no migration."
+    validations:
+      required: true
+  - type: textarea
+    id: out_of_scope
+    attributes:
+      label: Out of scope (optional)
+      description: Things you explicitly do not want done in this task.
+    validations:
+      required: false
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety confirmation
+      options:
+        - label: I confirm this issue contains no secrets, credentials or customer data.
+          required: true
