@@ -37,10 +37,23 @@ THRESHOLDS = (0.80, 1.00)
 Runner = Callable[[Sequence[str]], Dict[str, Any]]
 
 
+def _hermes_cmd(*args: str) -> list:
+    """Lệnh `hermes send` chạy qua profile chỉ định (mặc định: "default").
+
+    Worker chạy trong profile `worker-agent`, nhưng profile đó không có session Telegram
+    nào để mirror thông báo vào. Profile mặc định thì có kênh đã hoạt động, nên thông báo
+    được gửi qua đó; khoá inference của worker KHÔNG bị ảnh hưởng — đây chỉ là đường gửi.
+    Đặt ``STEVEN_NOTIFY_PROFILE=current`` để giữ hành vi cũ (gửi trong profile hiện tại).
+    """
+    profile = (os.environ.get("STEVEN_NOTIFY_PROFILE") or "default").strip()
+    if not profile or profile == "current":
+        return ["hermes", "send", *args]
+    return ["hermes", "-p", profile, "send", *args]
+
 def default_runner(args: Sequence[str]) -> Dict[str, Any]:
     """Gửi qua Hermes (đọc credential sẵn có). Không truyền --json để tránh in chat id."""
     try:
-        proc = subprocess.run(["hermes", "send", *args], capture_output=True,
+        proc = subprocess.run(_hermes_cmd(*args), capture_output=True,
                               text=True, timeout=60)
         return {"ok": proc.returncode == 0, "returncode": proc.returncode,
                 "stdout": (proc.stdout or "").strip()[-300:]}
