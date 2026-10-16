@@ -135,3 +135,15 @@ Served read-only by `src/gbp/api/server.py` from the top-level `web/` dir (CSP `
   `AREA_ALIASES`, canonical areas stay the 8 in `AREAS`).
 - Reuse `renderLoading`/`renderEmpty`/`renderErrorState` for any new panel; never hardcode numbers.
 
+## Worker safety summary
+
+Before a worker run may open a pull request it passes through these controls, in order:
+
+- **Budget gate** — runs before the run starts: `scripts/worker_gate.py` decides the provider-aware daily budget and the issue gate and refuses the run outright if either layer says no.
+- **Atomic claim with TTL** — the issue is claimed atomically with a short time-to-live, so overlapping ticks cannot work the same issue twice and a crashed run frees its claim.
+- **Mandatory diff gate** — `scripts/issue_guard.py verify-diff` must pass against `origin/main` before anything is committed or pushed; the pre-commit and pre-push hooks run the same gate.
+- **Branch-only push** — the worker pushes its own branch and nothing else: never a force-push, never a merge, never a deploy, and `main` stays untouched.
+- **Telegram notification** — once the outcome is known, `worker_gate.py finish` releases the budget hold, records the real cost and sends the outcome notification.
+
+Labels are the only way a task enters this pipeline, and only the repository owner can add hermes-ready.
+
