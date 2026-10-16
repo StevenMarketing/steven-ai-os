@@ -1,19 +1,19 @@
-"""Google OAuth web-flow glue for GReply (connect / callback / disconnect).
+"""Google OAuth web-flow glue for the GBP platform (connect / callback / disconnect).
 
 Lives in ``scripts/`` on purpose: ``src/gbp/auth/**`` is a protected path, so the auth
 package is left untouched and the owner decides when (and whether) this moves there.
 
-Design rules (all fail-closed):
+Security rules enforced here (all fail-closed):
 
-* nothing here calls Google unless :func:`live_ready` says the operator opted in
-  (``GBP_ALLOW_LIVE_GOOGLE=1``), a client id/secret exist and a redirect URI is set;
-* ``state`` and PKCE are mandatory, single-use, and bound to the caller's session
-  record -- a callback with a missing, unknown or replayed state ends in
-  :class:`GoogleSetupRequired`/``FlowError`` and never exchanges a code;
-* no token, client secret or authorization code is ever returned in a report, a log
-  line or an exception message;
-* ``list_locations_read_only`` never invents rows: with no credentials it raises
-  instead of returning demo data dressed up as real data.
+* nothing calls Google unless :func:`live_ready` says the operator opted in
+  (``GBP_ALLOW_LIVE_GOOGLE=1``), a client id/secret exist and a *safe* redirect URI is set;
+* the redirect URI must be HTTPS, or the loopback form used for local development;
+* ``state`` is mandatory, single-use, re-entrancy guarded, and **burned before the
+  exchange** so a failed or concurrent callback can never reuse it;
+* PKCE is never silently dropped: the verifier is handed to the exchanger when it accepts
+  one, and the flow refuses to exchange when it does not;
+* no token, client secret, authorization code or verifier is ever returned, logged, or
+  allowed to escape inside an exception message.
 """
 
 from __future__ import annotations
@@ -21,21 +21,25 @@ from __future__ import annotations
 import base64
 import hashlib
 import os
+import re
 import secrets
 import time
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Sequence
+from urllib.parse import urlsplit
 
 from gbp.auth.oauth import SCOPES, build_authorization_url, live_google_allowed
 
 __all__ = [
-    "GoogleSetupRequired", "FlowError", "live_ready", "start_flow", "finish_flow",
-    "list_locations_read_only", "disconnect", "token_path", "REDIRECT_ENV", "CLIENT_ID_ENV",
-    "CLIENT_SECRET_ENV", "MAX_TEST_LOCATIONS",
+    "GoogleSetupRequired", "FlowError", "live_ready", "check_redirect_uri", "start_flow",
+    "finish_flow", "list_locations_read_only", "locations_fetcher", "disconnect",
+    "token_path", "redact", "REDIRECT_ENV", "CLIENT_ID_ENV", "CLIENT_SECRET_ENV",
+    "MAX_TEST_LOCATIONS",
 ]
 
 CLIENT_ID_ENV = "GBP_GOOGLE_CLIENT_ID"
 CLIENT_SECRET_ENV = "GBP_GOOGLE_CLIENT_SECRET"
 REDIRECT_ENV = "GBP_OAUTH_REDIRECT_URI"
+TOKEN_PATH_ENV = "GBP_TOKEN_PATH"
 
 #: Hard cap for the connection test: list at most five locations.
 MAX_TEST_LOCATIONS = 5
@@ -43,13 +47,20 @@ MAX_TEST_LOCATIONS = 5
 #: How long a started flow stays usable (seconds).
 FLOW_TTL_SECONDS = 600
 
+#: Shapes that must never appear in a message this module raises.
+_SECRET_SHAPES = (
+    re.compile(r"\bsk-or-v1-[A-Za-z0-9]{10,}\b"),
+    re.compile(r"\bsk-[A-Za-z0-9]{20,}\b"),
+    re.compile(r"\bAIza[0-9A-Za-z\-_]{20,}\b"),
+    re.compile(r"\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{10,}\b"),
+)
+
 
 class GoogleSetupRequired(RuntimeError):
     """Raised when the live connection is not allowed/configured yet.
 
-    ``reason`` is a stable code (``live_opt_in_missing``, ``client_id_missing``,
-    ``client_secret_missing``, ``redirect_uri_missing``, ``not_approved``); the
-    message is safe to show to an operator and contains no secret.
+    ``reason`` is a stable code; the message is safe to show to an operator and contains
+    no secret.
     """
 
     def __init__(self, reason: str, remedy: str = "") -> None:
@@ -59,11 +70,26 @@ class GoogleSetupRequired(RuntimeError):
 
 
 class FlowError(RuntimeError):
-    """Raised for a bad callback (missing/unknown/replayed state, wrong session)."""
+    """Raised for a bad callback (bad state, replay, in-flight, PKCE or exchange error)."""
 
     def __init__(self, reason: str) -> None:
         super().__init__("google_flow_error: %s" % reason)
         self.reason = reason
+
+
+def redact(text: Any, secrets_: Sequence[str] = ()) -> str:
+    """Return ``text`` with any secret-shaped run and any known secret removed.
+
+    Used on every message that could carry an exchanger's own error text, so a provider
+    that echoes the request body cannot leak the code, the secret or a token.
+    """
+    out = str(text)
+    for value in secrets_:
+        if value:
+            out = out.replace(str(value), "[redacted]")
+    for pattern in _SECRET_SHAPES:
+        out = pattern.sub("[redacted]", out)
+    return out
 
 
 def _conf(environ: Optional[Dict[str, str]] = None) -> Dict[str, str]:
@@ -75,32 +101,49 @@ def _conf(environ: Optional[Dict[str, str]] = None) -> Dict[str, str]:
     }
 
 
-def live_ready(environ: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
-    """Say whether a live call is permitted, without calling anything.
+def check_redirect_uri(uri: str) -> Dict[str, Any]:
+    """Say whether a redirect URI is acceptable, and why not when it is not.
 
-    Returns ``{"ready": bool, "reason": str|None, "remedy": str, "have": {...bool}}``.
-    ``have`` only reports presence, never values.
+    HTTPS is required; the loopback forms used for local development are allowed because
+    they never leave the machine. A fragment is refused (the code would land in the URL
+    bar and in history), and so is a relative or scheme-less value.
     """
+    value = str(uri or "").strip()
+    if not value:
+        return {"ok": False, "reason": "redirect_uri_missing"}
+    parts = urlsplit(value)
+    if not parts.scheme or not parts.netloc:
+        return {"ok": False, "reason": "redirect_uri_not_absolute"}
+    if parts.fragment:
+        return {"ok": False, "reason": "redirect_uri_has_fragment"}
+    if parts.scheme == "https":
+        return {"ok": True, "reason": None, "loopback": False}
+    host = (parts.hostname or "").lower()
+    if parts.scheme == "http" and host in ("127.0.0.1", "localhost", "::1"):
+        return {"ok": True, "reason": None, "loopback": True}
+    return {"ok": False, "reason": "redirect_uri_not_https"}
+
+
+def live_ready(environ: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+    """Say whether a live call is permitted, without calling anything."""
     env = os.environ if environ is None else environ
     conf = _conf(env)
     opted_in = (str(env.get("GBP_ALLOW_LIVE_GOOGLE") or "").strip() == "1") if environ is not None else live_google_allowed()
+    have = {"client_id": bool(conf["client_id"]), "client_secret": bool(conf["client_secret"]),
+            "redirect_uri": bool(conf["redirect_uri"]), "opt_in": bool(opted_in)}
     if not opted_in:
         return {"ready": False, "reason": "live_opt_in_missing",
-                "remedy": "set GBP_ALLOW_LIVE_GOOGLE=1 on purpose for this run",
-                "have": {"client_id": bool(conf["client_id"]), "client_secret": bool(conf["client_secret"]),
-                         "redirect_uri": bool(conf["redirect_uri"]), "opt_in": False}}
-    have = {"client_id": bool(conf["client_id"]), "client_secret": bool(conf["client_secret"]),
-            "redirect_uri": bool(conf["redirect_uri"]), "opt_in": True}
+                "remedy": "set GBP_ALLOW_LIVE_GOOGLE=1 on purpose for this run", "have": have}
     for key, reason in (("client_id", "client_id_missing"), ("client_secret", "client_secret_missing")):
         if not conf[key]:
             return {"ready": False, "reason": reason,
                     "remedy": "set %s in the operator environment (never share it in chat)"
                               % (CLIENT_ID_ENV if key == "client_id" else CLIENT_SECRET_ENV),
                     "have": have}
-    if not conf["redirect_uri"]:
-        return {"ready": False, "reason": "redirect_uri_missing",
-                "remedy": "set %s to the stable HTTPS callback, e.g. "
-                          "https://gbp.adzdigital.com/api/google/oauth/callback" % REDIRECT_ENV,
+    uri = check_redirect_uri(conf["redirect_uri"])
+    if not uri["ok"]:
+        return {"ready": False, "reason": uri["reason"],
+                "remedy": "set %s to https://gbp.adzdigital.com/api/google/oauth/callback" % REDIRECT_ENV,
                 "have": have}
     return {"ready": True, "reason": None, "remedy": "", "have": have}
 
@@ -112,14 +155,21 @@ def _pkce_pair() -> Dict[str, str]:
     return {"code_verifier": verifier, "code_challenge": challenge, "code_challenge_method": "S256"}
 
 
+def _accepts_verifier(exchanger: Callable[..., Any]) -> bool:
+    """True when the injected exchanger can take the PKCE verifier."""
+    import inspect
+    try:
+        params = inspect.signature(exchanger).parameters
+    except (TypeError, ValueError):  # pragma: no cover - builtins
+        return False
+    if "code_verifier" in params:
+        return True
+    return any(p.kind == p.VAR_KEYWORD for p in params.values())
+
+
 def start_flow(*, environ: Optional[Dict[str, str]] = None, now: Optional[float] = None,
                scopes: Optional[List[str]] = None) -> Dict[str, Any]:
-    """Build the consent URL plus the session record the caller must store.
-
-    The returned dict holds ``authorization_url``, ``state``, ``created_at`` and the
-    PKCE verifier. Only ``authorization_url`` may be shown to a browser; the verifier
-    stays server-side.
-    """
+    """Build the consent URL plus the session record the caller must store."""
     state = live_ready(environ)
     if not state["ready"]:
         raise GoogleSetupRequired(state["reason"], state["remedy"])
@@ -142,6 +192,54 @@ def start_flow(*, environ: Optional[Dict[str, str]] = None, now: Optional[float]
     }
 
 
+def finish_flow(code: str, state: str, flow_session: Optional[Dict[str, Any]], *,
+                environ: Optional[Dict[str, str]] = None, now: Optional[float] = None,
+                exchanger: Optional[Callable[..., Any]] = None,
+                store: Optional[Callable[..., Any]] = None) -> Dict[str, Any]:
+    """Verify the callback and persist the token. Returns safe metadata only.
+
+    The state is burned **before** the exchange: a failed, replayed or concurrent
+    callback can never reuse it, and a failure never leaves the state available for a
+    second attempt.
+    """
+    state_info = live_ready(environ)
+    if not state_info["ready"]:
+        raise GoogleSetupRequired(state_info["reason"], state_info["remedy"])
+    session = _check_state(flow_session, state, now)
+    if not code:
+        raise FlowError("missing_code")
+    conf = _conf(environ)
+    if exchanger is None:
+        raise GoogleSetupRequired("exchanger_not_wired",
+                                  "pass exchanger=gbp.auth.oauth.exchange_code-bound callable")
+    if not _accepts_verifier(exchanger):
+        # Never fall back to a verifier-less exchange: that would silently downgrade PKCE.
+        raise FlowError("pkce_not_threaded")
+    # Burn first: claim the state, then exchange. A crash or a concurrent callback now
+    # finds the state unusable instead of racing for a second token.
+    session["used"] = True
+    session["used_at"] = float(now if now is not None else time.time())
+    session["in_flight"] = True
+    secrets_ = (conf["client_secret"], code, str(session.get("code_verifier") or ""))
+    try:
+        payload = exchanger(client_id=conf["client_id"], client_secret=conf["client_secret"],
+                            code=code, redirect_uri=session.get("redirect_uri") or conf["redirect_uri"],
+                            code_verifier=session.get("code_verifier"))
+    except Exception as exc:  # noqa: BLE001 - any provider failure is reported safely
+        raise FlowError("exchange_error: %s" % redact(exc, secrets_)) from None
+    finally:
+        session["in_flight"] = False
+    token = payload.get("token") if isinstance(payload, dict) else payload
+    if token is None:
+        raise FlowError("exchange_failed")
+    try:
+        saved = (store or _default_store())(token)
+    except Exception as exc:  # noqa: BLE001 - storage failure must not leak either
+        raise FlowError("store_error: %s" % redact(exc, secrets_)) from None
+    return {"connected": True, "saved": bool(saved), "scopes": list(session.get("scopes") or SCOPES),
+            "token_redacted": True}
+
+
 def _check_state(flow_session: Optional[Dict[str, Any]], state: str,
                  now: Optional[float] = None) -> Dict[str, Any]:
     if not flow_session or not flow_session.get("state"):
@@ -151,62 +249,72 @@ def _check_state(flow_session: Optional[Dict[str, Any]], state: str,
     age = float(now if now is not None else time.time()) - float(flow_session.get("created_at") or 0.0)
     if age > FLOW_TTL_SECONDS:
         raise FlowError("state_expired")
+    if flow_session.get("in_flight"):
+        raise FlowError("state_in_flight")
     if flow_session.get("used"):
         raise FlowError("state_replayed")
     return flow_session
 
 
-def finish_flow(code: str, state: str, flow_session: Optional[Dict[str, Any]], *,
-                environ: Optional[Dict[str, str]] = None, now: Optional[float] = None,
-                exchanger: Optional[Callable[..., Any]] = None,
-                store: Optional[Callable[..., Any]] = None) -> Dict[str, Any]:
-    """Verify the callback and persist the token. Returns safe metadata only."""
-    state_info = live_ready(environ)
-    if not state_info["ready"]:
-        raise GoogleSetupRequired(state_info["reason"], state_info["remedy"])
-    session = _check_state(flow_session, state, now)
-    if not code:
-        raise FlowError("missing_code")
-    conf = _conf(environ)
-    if exchanger is None:
-        from gbp.auth.oauth import exchange_code as exchanger  # local import: keeps this module import-light
-    # The real exchange_code() takes (transport, *, client_id, code, redirect_uri,
-    # client_secret) -- no verifier argument yet, so the verifier stays in the session
-    # record until PKCE is threaded through the exchange.
-    payload = exchanger(client_id=conf["client_id"], client_secret=conf["client_secret"],
-                        code=code, redirect_uri=session.get("redirect_uri") or conf["redirect_uri"])
-    token = payload.get("token") if isinstance(payload, dict) else payload
-    if token is None:
-        raise FlowError("exchange_failed")
-    session["used"] = True
-    saved = (store or _default_store())(token)
-    return {"connected": True, "saved": bool(saved), "scopes": list(session.get("scopes") or SCOPES),
-            "token_redacted": True}
-
-
 def token_path(environ: Optional[Dict[str, str]] = None) -> str:
-    """Where a stored token would live (path only -- never the token)."""
+    """Where a stored token lives. Default is outside the repository, never inside it."""
     env = os.environ if environ is None else environ
-    return str(env.get("GBP_TOKEN_PATH") or os.path.join(os.getcwd(), ".gbp_token.json"))
+    configured = str(env.get(TOKEN_PATH_ENV) or "").strip()
+    if configured:
+        return configured
+    return os.path.join(os.path.expanduser("~"), ".gbp_token.json")
 
 
 def _default_store() -> Callable[..., Any]:
-    def _store(token: Any) -> bool:  # pragma: no cover - refuses until wired on purpose
-        raise GoogleSetupRequired(
-            "store_not_wired",
-            "pass a store= callable backed by gbp.auth.token_manager.TokenManager "
-            "(the manager's save signature must be confirmed before wiring)")
+    """Persist through the existing token manager (mode 0600, redacted repr)."""
+
+    def _store(token: Any, path: Optional[str] = None) -> bool:
+        from gbp.auth.token_manager import TokenManager
+        manager = TokenManager(path or token_path())
+        manager.token = token
+        manager.save()
+        return True
+
     return _store
+
+
+def locations_fetcher(client: Any, *, page_size: int = MAX_TEST_LOCATIONS) -> Callable[..., Any]:
+    """Wrap an injected read-only client into the fetcher this module expects.
+
+    Nothing here builds a client or reaches the network by itself: the caller injects an
+    already-authenticated client, which the live ladder must have allowed first. The
+    adapter only reads and only keeps the four fields the preview needs.
+    """
+    base_url = "https://mybusinessbusinessinformation.googleapis.com/v1"
+    limit = min(int(page_size or MAX_TEST_LOCATIONS), MAX_TEST_LOCATIONS)
+
+    def _fetch(*, account: Optional[str] = None, limit: int = limit) -> List[Dict[str, Any]]:
+        scope = str(account or "accounts/-")
+        response = client.get(
+            "%s/%s/locations" % (base_url, scope),
+            params={"readMask": "name,title,storefrontAddress", "pageSize": min(int(limit), MAX_TEST_LOCATIONS)},
+        )
+        payload = response.json() if hasattr(response, "json") else response
+        rows = (payload or {}).get("locations") or []
+        out: List[Dict[str, Any]] = []
+        for row in rows:
+            address = row.get("storefrontAddress") or {}
+            lines = address.get("addressLines") or []
+            out.append({
+                "location_id": str(row.get("name") or ""),
+                "business_name": str(row.get("title") or ""),
+                "address": ", ".join(str(x) for x in lines),
+                "zip": str(address.get("postalCode") or ""),
+            })
+        return out
+
+    return _fetch
 
 
 def list_locations_read_only(*, limit: int = MAX_TEST_LOCATIONS, environ: Optional[Dict[str, str]] = None,
                              fetcher: Optional[Callable[..., Any]] = None,
                              account: Optional[str] = None) -> List[Dict[str, Any]]:
-    """Read at most ``limit`` locations (default 5) — read-only, never fabricated.
-
-    With no live configuration this raises :class:`GoogleSetupRequired`; it never
-    falls back to fixture rows, so a demo number can never be mistaken for a real one.
-    """
+    """Read at most ``limit`` locations (default 5) -- read-only, never fabricated."""
     state = live_ready(environ)
     if not state["ready"]:
         raise GoogleSetupRequired(state["reason"], state["remedy"])
