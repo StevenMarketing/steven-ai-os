@@ -92,6 +92,7 @@ Cách này giữ nguyên "không vô hiệu hoá kiểm soát bảo mật" mà v
 | `command parser limit or malformed executable payload` | lệnh dài/bị parser cắt | không trực tiếp | thấp (hệ quả cú pháp, không phải quyền) | giữ |
 | `execute_code` | công cụ `execute_code` của Hermes — **chạy Python tuỳ ý** | **không** (runbook chỉ dùng terminal + ghi file) | **cao** | có thể bỏ để siết; đổi lại mọi phiên sẽ bị hỏi lại khi dùng công cụ này |
 | `script execution via -e/-c flag` | `python3 -c`, `sh -c`… (**code tuỳ ý inline**) | **trước đây có** — bước 3 tính tên branch | **cao** | **đã loại nhu cầu**: bước 3 nay dùng `python3 scripts/branch_for.py N "<title>"` (script đã kiểm vào repo, có test) ⇒ có thể bỏ mục này |
+| `script execution via heredoc` | `python3 - <<'PY' … PY` (**code tuỳ ý qua heredoc**) | **không** — runbook không dùng heredoc | **cao** | có thể bỏ. Mục này **tự xuất hiện trong phiên này** khi chủ sở hữu bấm "allow" cho vài lệnh heredoc tôi chạy để kiểm chứng; đó là cách allowlist vốn hoạt động (mỗi lần duyệt sẽ ghi lại mẫu lý do) |
 
 **Lượt này KHÔNG đổi gì** (đúng yêu cầu "không nới quyền hoặc tắt smart approval"):
 không hạ `approvals.mode`, không thêm, không xoá mục nào.
