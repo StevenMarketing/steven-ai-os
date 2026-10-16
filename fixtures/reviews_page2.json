@@ -1,0 +1,62 @@
+{
+  "reviews": [
+    {
+      "name": "accounts/1001/locations/loc-001/reviews/r-1004",
+      "reviewId": "r-1004",
+      "starRating": "ONE",
+      "comment": "Terrible experience. They chipped my nails the same day and the staff was rude.",
+      "createTime": "2026-09-08T19:20:00Z",
+      "updateTime": "2026-09-08T19:20:00Z",
+      "reviewer": {
+        "displayName": "Bob Tran"
+      }
+    },
+    {
+      "name": "accounts/1001/locations/loc-001/reviews/r-1005",
+      "reviewId": "r-1005",
+      "starRating": "FIVE",
+      "comment": "Rất hài lòng, nhân viên thân thiện và làm móng rất đẹp. Sẽ quay lại!",
+      "createTime": "2026-09-10T06:30:00Z",
+      "updateTime": "2026-09-10T06:30:00Z",
+      "reviewer": {
+        "displayName": "Ngọc Phạm"
+      }
+    },
+    {
+      "name": "accounts/1001/locations/loc-001/reviews/r-1006",
+      "reviewId": "r-1006",
+      "starRating": "FIVE",
+      "comment": "Anna is the sweetest — she did an amazing job and my nails look flawless.",
+      "createTime": "2026-09-12T14:05:00Z",
+      "updateTime": "2026-09-12T14:05:00Z",
+      "reviewer": {
+        "displayName": "Grace Kim"
+      }
+    },
+    {
+      "name": "accounts/1001/locations/loc-001/reviews/r-1001",
+      "reviewId": "r-1001",
+      "starRating": "FIVE",
+      "comment": "Absolutely love my gel manicure! Kim took her time and it looks perfect. (updated)",
+      "createTime": "2026-09-01T10:15:00Z",
+      "updateTime": "2026-09-13T09:00:00Z",
+      "reviewer": {
+        "displayName": "Alice Nguyen",
+        "profilePhotoUrl": "https://example.invalid/photos/alice.png"
+      }
+    },
+    {
+      "name": "accounts/1001/locations/loc-001/reviews/r-1011",
+      "reviewId": "r-1011",
+      "starRating": "TWO",
+      "comment": "Loved the nail art design, I will definitely come back. (downgraded: design chipped within two days)",
+      "createTime": "2026-09-16T10:00:00Z",
+      "updateTime": "2026-09-20T10:00:00Z",
+      "reviewer": {
+        "displayName": "Henry Do"
+      }
+    }
+  ],
+  "totalSize": 11,
+  "averageRating": 3.6
+}

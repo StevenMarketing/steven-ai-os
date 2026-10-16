@@ -1,0 +1,383 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Steven AI OS — Google Reviews Manager</title>
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <!--
+    Steven AI OS — Google Reviews Manager : V2 application shell (Group 7 / T18 + T19).
+
+    NAV -> AREA MAPPING (authoritative; mirrored in web/app.js AREAS + AREA_ALIASES)
+      Overview       -> area=dashboard     (aliases: overview, dashboard) [was "Dashboard"]
+      Locations      -> area=locations     (aliases: locations)
+      Review Inbox   -> area=inbox         (aliases: inbox, reviews, review-inbox)
+      AI Drafts      -> area=drafts        (aliases: drafts, ai-drafts)
+      Needs Approval -> area=needs_review  (aliases: needs_review, needs-approval, needs-review)
+      Approved       -> area=approved      (aliases: approved)
+      Rejected       -> area=rejected      (aliases: rejected)
+      Audit History  -> area=audit         (aliases: audit, audit-history)
+      System Status  -> area=status        (shell-only panel, real sync data)
+      Settings       -> area=settings      (shell-only panel, honest / no fake toggles)
+
+    The shipped dashboard keeps using ?area=<value>; every value above (old and
+    alias) resolves to the same 8 underlying areas, so old bookmarks still work.
+
+    CSP note: script-src/style-src are 'self' only — no inline <script>, no
+    inline <style>, no style="" attributes anywhere in this document. The
+    Overview charts are inline SVG whose geometry is set with SVG attributes,
+    never with a style attribute.
+  -->
+  <div class="banner" id="draft-mode-banner" role="alert">
+    DRAFT MODE — nothing is published to Google
+  </div>
+
+  <div class="app" id="app">
+    <!-- Mobile/tablet off-canvas overlay -->
+    <div class="nav-overlay" id="nav-overlay" hidden></div>
+
+    <aside class="sidebar" id="sidebar" aria-label="Primary">
+      <div class="sidebar-brand">
+        <span class="brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="22" height="22" focusable="false">
+            <rect x="3" y="3" width="18" height="18" rx="4" fill="none" stroke="currentColor" stroke-width="1.8"/>
+            <path d="M7 12.5l3 3 7-7" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </span>
+        <span class="brand-text">
+          <span class="brand-title">Steven AI OS</span>
+          <span class="brand-sub">Google Reviews Manager</span>
+        </span>
+      </div>
+
+      <nav class="nav" aria-label="Sections">
+        <button class="tab" data-area="dashboard" type="button" data-i18n="nav.overview" aria-current="page">
+          <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false"><rect x="3" y="3" width="8" height="8" rx="2" fill="none" stroke="currentColor" stroke-width="1.7"/><rect x="13" y="3" width="8" height="5" rx="2" fill="none" stroke="currentColor" stroke-width="1.7"/><rect x="13" y="10" width="8" height="11" rx="2" fill="none" stroke="currentColor" stroke-width="1.7"/><rect x="3" y="13" width="8" height="8" rx="2" fill="none" stroke="currentColor" stroke-width="1.7"/></svg>
+          <span class="tab-label">Overview</span>
+        </button>
+        <button class="tab" data-area="locations" type="button" data-i18n="nav.locations">
+          <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false"><path d="M12 21s7-6.1 7-11a7 7 0 10-14 0c0 4.9 7 11 7 11z" fill="none" stroke="currentColor" stroke-width="1.7"/><circle cx="12" cy="10" r="2.6" fill="none" stroke="currentColor" stroke-width="1.7"/></svg>
+          <span class="tab-label">Locations</span>
+        </button>
+        <button class="tab" data-area="inbox" type="button" data-i18n="nav.reviewInbox">
+          <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false"><path d="M3 12l9-8 9 8v8a1 1 0 01-1 1H4a1 1 0 01-1-1z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><path d="M9 21v-6h6v6" fill="none" stroke="currentColor" stroke-width="1.7"/></svg>
+          <span class="tab-label">Review Inbox</span>
+        </button>
+        <button class="tab" data-area="drafts" type="button" data-i18n="nav.aiDrafts">
+          <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false"><path d="M5 3h9l5 5v13a1 1 0 01-1 1H5a1 1 0 01-1-1V4a1 1 0 011-1z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><path d="M14 3v5h5" fill="none" stroke="currentColor" stroke-width="1.7"/></svg>
+          <span class="tab-label">AI Drafts</span>
+        </button>
+        <button class="tab" data-area="needs_review" type="button" data-i18n="nav.needsApproval">
+          <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M12 7v6l4 2" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
+          <span class="tab-label">Needs Approval</span>
+        </button>
+        <button class="tab" data-area="approved" type="button" data-i18n="nav.approved">
+          <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M8 12.5l2.6 2.6L16 9.5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          <span class="tab-label">Approved</span>
+        </button>
+        <button class="tab" data-area="rejected" type="button" data-i18n="nav.rejected">
+          <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M9 9l6 6M15 9l-6 6" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
+          <span class="tab-label">Rejected</span>
+        </button>
+        <button class="tab" data-area="audit" type="button" data-i18n="nav.auditHistory">
+          <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false"><path d="M12 8v5l3 2" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/><path d="M3.5 12a8.5 8.5 0 108.5-8.5A8.5 8.5 0 006 5.2" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M3 4v4h4" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          <span class="tab-label">Audit History</span>
+        </button>
+      </nav>
+
+      <div class="nav-bottom" aria-label="System">
+        <button class="nav-sub" data-area="status" type="button" data-i18n="nav.systemStatus">
+          <span class="dot" id="nav-status-dot" aria-hidden="true"></span>
+          <span class="tab-label">System Status</span>
+        </button>
+        <button class="nav-sub" data-area="settings" type="button" data-i18n="nav.settings">
+          <span class="tab-label">Settings</span>
+        </button>
+        <p class="app-version" id="app-version" data-i18n="shell.version">v2.0.0</p>
+      </div>
+    </aside>
+
+    <div class="content">
+      <header class="topbar">
+        <button class="nav-toggle" id="nav-toggle" type="button"
+                aria-controls="sidebar" aria-expanded="false" aria-label="Toggle navigation">
+          <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true" focusable="false">
+            <path d="M4 7h16M4 12h16M4 17h16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+          </svg>
+        </button>
+
+        <div class="topbar-titles">
+          <h1 class="topbar-brand">Steven AI OS</h1>
+          <p class="topbar-sub">Google Reviews Manager</p>
+        </div>
+
+        <div class="topbar-right">
+          <span class="status-pill" id="status-pill" role="status" aria-live="polite">
+            <span class="dot" aria-hidden="true"></span>
+            <span class="status-pill-text" id="status-pill-text">Checking sync health…</span>
+          </span>
+          <div class="actor">
+            <label for="actor-input" id="actor-label">Actor</label>
+            <input id="actor-input" type="text" value="manager" autocomplete="off">
+            <span id="actor-name" class="actor-name" hidden></span>
+          </div>
+        </div>
+      </header>
+
+      <main id="main">
+        <!-- Overview -> area=dashboard -->
+        <section class="area" id="area-dashboard" hidden>
+          <h2>Overview</h2>
+          <p class="muted" id="dashboard-unanswered"></p>
+
+          <h3 class="panel-title">Key metrics</h3>
+          <p class="muted" id="kpi-units-caption"></p>
+          <div class="kpi-grid" id="kpi-grid"></div>
+
+          <div class="grid-2">
+            <div class="panel">
+              <h3 class="panel-title">Rating distribution</h3>
+              <div id="rating-distribution"></div>
+            </div>
+            <div class="panel">
+              <h3 class="panel-title">Review trend</h3>
+              <div id="review-trend"></div>
+            </div>
+          </div>
+
+          <h3 class="panel-title">Locations needing attention</h3>
+          <div class="table-scroll">
+            <div id="attention-locations"></div>
+          </div>
+
+          <h3 class="panel-title">Recent reviews</h3>
+          <div class="table-scroll">
+            <div id="recent-reviews"></div>
+          </div>
+
+          <h3 class="panel-title">Sync Status</h3>
+          <div id="sync-status-panel" class="status-panel"></div>
+
+          <h3 class="panel-title">AI Usage / Cost</h3>
+          <div class="kpi-grid" id="usage-panel"></div>
+        </section>
+
+        <!-- Locations -> area=locations -->
+        <section class="area" id="area-locations" hidden>
+          <h2>Locations</h2>
+
+          <form class="filters" id="loc-filters" onsubmit="return false;">
+            <label for="loc-q">Search business or ZIP
+              <input id="loc-q" name="q" type="search" placeholder="business name or ZIP code">
+            </label>
+            <label for="loc-state">State
+              <select id="loc-state" name="state">
+                <option value="">Any</option>
+              </select>
+            </label>
+            <label for="loc-sync">Sync status
+              <select id="loc-sync" name="sync_status">
+                <option value="">Any</option>
+                <option value="ok">ok</option>
+                <option value="failed">failed</option>
+              </select>
+            </label>
+            <label for="loc-page-size">Per page
+              <select id="loc-page-size" name="page_size">
+                <option value="10">10</option>
+                <option value="25" selected>25</option>
+                <option value="50">50</option>
+                <option value="100">100</option>
+              </select>
+            </label>
+            <button type="button" id="loc-search">Search</button>
+            <button type="button" id="loc-reset">Reset</button>
+          </form>
+
+          <div class="table-scroll">
+            <div id="locations-table"></div>
+          </div>
+
+          <div class="pager">
+            <button type="button" id="loc-prev">Prev</button>
+            <span class="muted" id="loc-page-info">Page 1 of 1 — 0 locations</span>
+            <button type="button" id="loc-next">Next</button>
+          </div>
+
+          <div class="panel" id="location-detail" hidden></div>
+
+          <div class="panel" id="location-reviews-panel" hidden>
+            <h3 class="panel-title" id="location-reviews-title">Recent reviews for this location</h3>
+            <div class="table-scroll">
+              <div id="location-reviews"></div>
+            </div>
+            <div class="pager">
+              <button type="button" id="lrev-prev">Prev</button>
+              <span class="muted" id="lrev-info">Page 1 of 1 — 0 total</span>
+              <button type="button" id="lrev-next">Next</button>
+            </div>
+          </div>
+        </section>
+
+        <!-- Review Inbox / AI Drafts / Needs Approval / Approved / Rejected -->
+        <section class="area" id="area-queue" hidden>
+          <h2 id="queue-title">Queue</h2>
+
+          <form class="filters" id="filters" onsubmit="return false;">
+            <label for="f-location">Location
+              <select id="f-location" name="location_id">
+                <option value="">All</option>
+              </select>
+            </label>
+            <label for="f-stars">Stars
+              <select id="f-stars" name="stars">
+                <option value="">Any</option>
+                <option value="1">1</option>
+                <option value="2">2</option>
+                <option value="3">3</option>
+                <option value="4">4</option>
+                <option value="5">5</option>
+              </select>
+            </label>
+            <label for="f-status">Status
+              <select id="f-status" name="status">
+                <option value="">Any</option>
+                <option value="draft">draft</option>
+                <option value="needs_review">needs_review</option>
+                <option value="approved">approved</option>
+                <option value="rejected">rejected</option>
+                <option value="ready_to_publish">ready_to_publish</option>
+                <option value="published">published</option>
+                <option value="failed">failed</option>
+              </select>
+            </label>
+            <label for="f-language">Language
+              <select id="f-language" name="language">
+                <option value="">Any</option>
+                <option value="en">en</option>
+                <option value="vi">vi</option>
+              </select>
+            </label>
+            <label for="f-since">Since
+              <input id="f-since" name="since" type="date">
+            </label>
+            <label for="f-q">Search
+              <input id="f-q" name="q" type="search" placeholder="comment or business">
+            </label>
+            <button type="button" id="f-search">Search</button>
+            <button type="button" id="f-apply">Apply</button>
+            <button type="button" id="f-reset">Reset</button>
+          </form>
+
+          <div class="bulkbar">
+            <button type="button" id="bulk-approve-btn" class="primary" disabled>Approve selected</button>
+            <span class="muted" id="bulk-count">0 selected</span>
+          </div>
+          <div class="notice" id="bulk-result" hidden></div>
+
+          <!-- Desktop: SPLIT VIEW (list left, detail right). Mobile (<700px):
+               list and detail are separate full-screen views toggled by the
+               detail-open class + the Back button. -->
+          <div class="split" id="queue-split">
+            <div class="split-list" id="queue-list-pane">
+              <div class="list-head muted" id="queue-count"></div>
+              <div id="queue-list" class="queue"></div>
+              <div class="pager" id="queue-pager">
+                <button type="button" id="page-prev">Prev</button>
+                <span class="muted" id="queue-page-info">Page 1 of 1 — 0 total</span>
+                <button type="button" id="page-next">Next</button>
+              </div>
+            </div>
+            <div class="split-detail" id="queue-detail-pane">
+              <div class="detail-head">
+                <button type="button" id="queue-detail-back" class="link-btn" hidden>Back</button>
+                <h3 class="panel-title" id="queue-detail-title">Review detail</h3>
+              </div>
+              <div id="queue-detail"></div>
+            </div>
+          </div>
+        </section>
+
+        <!-- Audit History -> area=audit -->
+        <section class="area" id="area-audit" hidden>
+          <h2>Audit History</h2>
+
+          <form class="filters" id="audit-filters" onsubmit="return false;">
+            <label for="audit-search">Search actor or action
+              <input id="audit-search" name="audit_q" type="search"
+                     placeholder="actor or action" aria-label="Search audit by actor or action">
+            </label>
+            <label for="audit-action">Action
+              <select id="audit-action" name="audit_action" aria-label="Filter audit by action">
+                <option value="">Any</option>
+              </select>
+            </label>
+            <label for="audit-since">Since
+              <input id="audit-since" name="audit_since" type="date" aria-label="Audit entries since date">
+            </label>
+            <label for="audit-until">Until
+              <input id="audit-until" name="audit_until" type="date" aria-label="Audit entries until date">
+            </label>
+            <button type="button" id="audit-apply">Apply</button>
+            <button type="button" id="audit-reset">Reset</button>
+          </form>
+
+          <div class="table-scroll">
+            <div id="audit-table"></div>
+          </div>
+
+          <div class="pager">
+            <button type="button" id="audit-prev" aria-label="Previous audit page">Prev</button>
+            <span class="muted" id="audit-page-info">Page 1 of 1 — 0 entries</span>
+            <button type="button" id="audit-next" aria-label="Next audit page">Next</button>
+          </div>
+        </section>
+
+        <!-- System Status -> area=status (shell panel, real API data) -->
+        <section class="area" id="area-status" hidden>
+          <h2>System Status</h2>
+          <p class="muted">Live sync health and per-location counters, read from
+            <code>/api/locations/status</code> and <code>/api/dashboard</code>.</p>
+          <div class="kpi-grid" id="system-status-cards"></div>
+          <div id="system-status-panel" class="status-panel"></div>
+        </section>
+
+        <!-- Settings -> area=settings (honest panel: no fake toggles) -->
+        <section class="area" id="area-settings" hidden>
+          <h2>Settings</h2>
+          <div class="panel" id="settings-panel">
+            <p class="muted" id="settings-empty">No configurable options yet.</p>
+            <ul class="settings-list" id="settings-list">
+              <li><span class="k">Actor</span><span class="v">The <code>Actor</code> field in the top bar sets who is recorded as the actor on approve / reject / edit. It is not persisted server-side in this build.</span></li>
+              <li><span class="k">Publishing</span><span class="v">Disabled by design — this build is DRAFT MODE only. There is no publish endpoint.</span></li>
+              <li><span class="k">Sync health</span><span class="v">Read-only. See System Status for the live per-location values.</span></li>
+            </ul>
+          </div>
+        </section>
+      </main>
+    </div>
+  </div>
+
+  <div class="notice" id="global-notice" hidden></div>
+
+  <!-- Login view: shown only when the server enforces auth (opt-in --auth).
+       In mock mode it stays hidden and the app behaves exactly as before. -->
+  <div class="login-view" id="login-view" role="dialog" aria-modal="true"
+       aria-labelledby="login-title" hidden>
+    <form class="login-card" id="login-form">
+      <h2 id="login-title">Sign in</h2>
+      <p class="muted">Authentication is enabled on this server.</p>
+      <label for="login-username">Username</label>
+      <input id="login-username" type="text" autocomplete="username" required>
+      <label for="login-password">Password</label>
+      <input id="login-password" type="password" autocomplete="current-password" required>
+      <button id="login-submit" type="submit" class="btn primary">Sign in</button>
+      <p class="login-error" id="login-error" role="alert" hidden></p>
+    </form>
+  </div>
+
+  <script src="./app.js"></script>
+</body>
+</html>

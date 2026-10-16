@@ -1,0 +1,47 @@
+{
+  "locations": [
+    {
+      "name": "accounts/1001/locations/loc-001",
+      "title": "Demo Nails — Garden Grove",
+      "city": "Garden Grove",
+      "state": "CA",
+      "language": "en"
+    },
+    {
+      "name": "accounts/1001/locations/loc-002",
+      "title": "Demo Nails — San Jose",
+      "city": "San Jose",
+      "state": "CA",
+      "language": "en"
+    },
+    {
+      "name": "accounts/1001/locations/loc-003",
+      "title": "Demo Nails — Houston",
+      "city": "Houston",
+      "state": "TX",
+      "language": "vi"
+    },
+    {
+      "name": "accounts/1001/locations/loc-004",
+      "title": "Demo Nails — Dallas",
+      "city": "Dallas",
+      "state": "TX",
+      "language": "en"
+    },
+    {
+      "name": "accounts/1001/locations/loc-005",
+      "title": "Demo Nails — Westminster",
+      "city": "Westminster",
+      "state": "CA",
+      "language": "vi"
+    },
+    {
+      "name": "accounts/1001/locations/loc-006",
+      "title": "Demo Nails — Atlanta",
+      "city": "Atlanta",
+      "state": "GA",
+      "language": "en"
+    }
+  ],
+  "totalSize": 6
+}

@@ -1,0 +1,12 @@
+{
+  "accounts": [
+    {
+      "name": "accounts/1001",
+      "accountName": "Demo Nail Group",
+      "type": "PERSONAL",
+      "role": "OWNER",
+      "verificationState": "VERIFIED",
+      "permalink": "https://business.google.com/demo-nail-group"
+    }
+  ]
+}

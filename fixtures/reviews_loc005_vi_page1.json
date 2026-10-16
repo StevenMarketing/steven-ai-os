@@ -1,0 +1,17 @@
+{
+  "reviews": [
+    {
+      "name": "accounts/1001/locations/loc-005/reviews/r-5001",
+      "reviewId": "r-5001",
+      "starRating": "FIVE",
+      "comment": "Tiệm làm móng rất đẹp, nhân viên dễ thương và chu đáo. Tôi rất hài lòng và sẽ quay lại.",
+      "createTime": "2026-09-09T07:30:00Z",
+      "updateTime": "2026-09-09T07:30:00Z",
+      "reviewer": {
+        "displayName": "Lan Nguyễn"
+      }
+    }
+  ],
+  "totalSize": 1,
+  "averageRating": 5.0
+}

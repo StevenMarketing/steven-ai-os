@@ -1,0 +1,111 @@
+{
+  "reviews": [
+    {
+      "name": "accounts/1001/locations/loc-001/reviews/r-1001",
+      "reviewId": "r-1001",
+      "starRating": "FIVE",
+      "comment": "Absolutely love my gel manicure! Kim took her time and it looks perfect.",
+      "createTime": "2026-09-01T10:15:00Z",
+      "updateTime": "2026-09-01T10:15:00Z",
+      "reviewer": {
+        "displayName": "Alice Nguyen",
+        "profilePhotoUrl": "https://example.invalid/photos/alice.png"
+      }
+    },
+    {
+      "name": "accounts/1001/locations/loc-001/reviews/r-1002",
+      "reviewId": "r-1002",
+      "starRating": "FIVE",
+      "comment": null,
+      "createTime": "2026-09-03T08:02:00Z",
+      "updateTime": "2026-09-03T08:02:00Z",
+      "reviewer": {
+        "displayName": "Minh Le"
+      }
+    },
+    {
+      "name": "accounts/1001/locations/loc-001/reviews/r-1003",
+      "reviewId": "r-1003",
+      "starRating": "FOUR",
+      "comment": "Great job on my pedicure, though I waited about 20 minutes.",
+      "createTime": "2026-09-05T17:40:00Z",
+      "updateTime": "2026-09-05T17:40:00Z",
+      "reviewReply": {
+        "comment": "Thank you for the feedback, Carlos! We are sorry about the wait.",
+        "updateTime": "2026-09-06T12:00:00Z"
+      },
+      "reviewer": {
+        "displayName": "Carlos Rivera"
+      }
+    },
+    {
+      "name": "accounts/1001/locations/loc-001/reviews/r-1007",
+      "reviewId": "r-1007",
+      "starRating": "THREE",
+      "comment": "It was okay, nothing special. The wait was fine but the finish chipped fast.",
+      "createTime": "2026-09-07T09:10:00Z",
+      "updateTime": "2026-09-07T09:10:00Z",
+      "reviewer": {
+        "displayName": "Dana Pham"
+      }
+    },
+    {
+      "name": "accounts/1001/locations/loc-001/reviews/r-1008",
+      "reviewId": "r-1008",
+      "starRating": "TWO",
+      "comment": "Not happy with the shape, though the staff did try to help me.",
+      "createTime": "2026-09-07T14:25:00Z",
+      "updateTime": "2026-09-07T14:25:00Z",
+      "reviewer": {
+        "displayName": "Evan Luu"
+      }
+    },
+    {
+      "name": "accounts/1001/locations/loc-001/reviews/r-1009",
+      "reviewId": "r-1009",
+      "starRating": "THREE",
+      "comment": null,
+      "createTime": "2026-09-08T11:00:00Z",
+      "updateTime": "2026-09-08T11:00:00Z",
+      "reviewer": {
+        "displayName": "Fiona Vo"
+      }
+    },
+    {
+      "name": "accounts/1001/locations/loc-001/reviews/r-1010",
+      "reviewId": "r-1010",
+      "starRating": "FIVE",
+      "comment": "Great service from the whole team, very clean place.",
+      "createTime": "2026-09-14T08:00:00Z",
+      "updateTime": "2026-09-14T08:00:00Z",
+      "reviewer": {
+        "displayName": "Gina Ho"
+      }
+    },
+    {
+      "name": "accounts/1001/locations/loc-001/reviews/r-1010",
+      "reviewId": "r-1010",
+      "starRating": "FIVE",
+      "comment": "Great service from the whole team, very clean place. (same-page updated)",
+      "createTime": "2026-09-14T08:00:00Z",
+      "updateTime": "2026-09-15T08:00:00Z",
+      "reviewer": {
+        "displayName": "Gina Ho"
+      }
+    },
+    {
+      "name": "accounts/1001/locations/loc-001/reviews/r-1011",
+      "reviewId": "r-1011",
+      "starRating": "FIVE",
+      "comment": "Loved the nail art design, I will definitely come back.",
+      "createTime": "2026-09-16T10:00:00Z",
+      "updateTime": "2026-09-16T10:00:00Z",
+      "reviewer": {
+        "displayName": "Henry Do"
+      }
+    }
+  ],
+  "nextPageToken": "reviews-page-2",
+  "totalSize": 11,
+  "averageRating": 3.6
+}

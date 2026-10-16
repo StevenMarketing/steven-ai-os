@@ -1,0 +1,78 @@
+{
+  "reviews": [
+    {
+      "name": "accounts/1001/locations/loc-001/reviews/r-3001",
+      "reviewId": "r-3001",
+      "starRating": "ONE",
+      "sensitiveCategory": "health_safety",
+      "comment": "I got a serious infection after my pedicure here, my foot was bleeding. They clearly do not sterilize their tools.",
+      "createTime": "2026-09-18T10:00:00Z",
+      "updateTime": "2026-09-18T10:00:00Z",
+      "reviewer": {
+        "displayName": "Karen B"
+      }
+    },
+    {
+      "name": "accounts/1001/locations/loc-001/reviews/r-3002",
+      "reviewId": "r-3002",
+      "starRating": "ONE",
+      "sensitiveCategory": "discrimination",
+      "comment": "They ignored me the whole time and only served customers who spoke English. It felt racist and unfair.",
+      "createTime": "2026-09-18T11:00:00Z",
+      "updateTime": "2026-09-18T11:00:00Z",
+      "reviewer": {
+        "displayName": "Mia K"
+      }
+    },
+    {
+      "name": "accounts/1001/locations/loc-001/reviews/r-3003",
+      "reviewId": "r-3003",
+      "starRating": "ONE",
+      "sensitiveCategory": "threat_abuse",
+      "comment": "F*** this place, you are all idiots. I will come back and destroy your shop.",
+      "createTime": "2026-09-18T12:00:00Z",
+      "updateTime": "2026-09-18T12:00:00Z",
+      "reviewer": {
+        "displayName": "Angry Guy"
+      }
+    },
+    {
+      "name": "accounts/1001/locations/loc-001/reviews/r-3004",
+      "reviewId": "r-3004",
+      "starRating": "ONE",
+      "sensitiveCategory": "legal_financial",
+      "comment": "I am going to sue you and file a complaint with the state board unless you refund me right now.",
+      "createTime": "2026-09-18T13:00:00Z",
+      "updateTime": "2026-09-18T13:00:00Z",
+      "reviewer": {
+        "displayName": "Robert L"
+      }
+    },
+    {
+      "name": "accounts/1001/locations/loc-001/reviews/r-3005",
+      "reviewId": "r-3005",
+      "starRating": "ONE",
+      "sensitiveCategory": "pii",
+      "comment": "The owner kept calling my personal number 555-123-4567 and discussed my medical condition with everyone in the shop.",
+      "createTime": "2026-09-18T14:00:00Z",
+      "updateTime": "2026-09-18T14:00:00Z",
+      "reviewer": {
+        "displayName": "Sofia D"
+      }
+    },
+    {
+      "name": "accounts/1001/locations/loc-001/reviews/r-3006",
+      "reviewId": "r-3006",
+      "starRating": "FIVE",
+      "sensitiveCategory": "spam_competitor",
+      "comment": "Best nails in town, visit www.cheap-nails-competitor.example for 50% off your first visit, way better than this place!",
+      "createTime": "2026-09-18T15:00:00Z",
+      "updateTime": "2026-09-18T15:00:00Z",
+      "reviewer": {
+        "displayName": "Promo Bot"
+      }
+    }
+  ],
+  "totalSize": 6,
+  "averageRating": 2.3
+}

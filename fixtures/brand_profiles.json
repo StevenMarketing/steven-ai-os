@@ -1,0 +1,32 @@
+{
+  "profiles": [
+    {
+      "location_id": "accounts/1001/locations/loc-001",
+      "business_name": "Demo Nails — Garden Grove",
+      "city": "Garden Grove",
+      "services_json": ["Manicure", "Pedicure", "Gel Nails", "Acrylic Nails", "Nail Art"],
+      "language": "en",
+      "tone": "warm-professional",
+      "seo_keywords_json": ["Nail Salon", "Manicure", "Gel Nails"],
+      "rules_json": {
+        "do_not_mention": ["Kim"],
+        "escalation_email": "owner@demo-nails.example"
+      },
+      "auto_publish_allowed": 0
+    },
+    {
+      "location_id": "accounts/1001/locations/loc-005",
+      "business_name": "Demo Nails — Westminster",
+      "city": "Westminster",
+      "services_json": ["Manicure", "Pedicure", "Dip Powder"],
+      "language": "vi",
+      "tone": "friendly",
+      "seo_keywords_json": ["Nail Salon", "Pedicure"],
+      "rules_json": {
+        "do_not_mention": ["Kim", "Anna"],
+        "escalation_email": "owner@demo-nails.example"
+      },
+      "auto_publish_allowed": 1
+    }
+  ]
+}

@@ -1,0 +1,838 @@
+{
+  "model": "deepseek/deepseek-v4.1-flash",
+  "cases": 10,
+  "results": [
+    {
+      "id": "case-01",
+      "label": "5-star EN with text + service mentioned",
+      "fixture": "reviews_page1.json",
+      "reviewId": "r-1011",
+      "location_id": "accounts/1001/locations/loc-001",
+      "brand_key": "accounts/1001/locations/loc-001",
+      "brand_complete": true,
+      "stars": 5,
+      "language": "en",
+      "is_sensitive": false,
+      "signals": [],
+      "is_rating_only": false,
+      "requires_manual_approval": false,
+      "review_snippet": "Loved the nail art design, I will definitely come back.",
+      "expected_status": "draft",
+      "actual_status": "draft",
+      "generation_status": "ok",
+      "error": null,
+      "message": null,
+      "attempts": 2,
+      "repair_used": true,
+      "reply": "Thank you so much — this made our day! It's wonderful to hear the nail art design came out just how you pictured it, since our team genuinely enjoys getting creative with custom designs. We'd be delighted to welcome you back anytime; feel free to bring along any inspiration you've been saving up, and we'll take it from there.",
+      "validation": {
+        "ok": true,
+        "checks": [
+          {
+            "name": "relevance",
+            "status": "pass",
+            "passed": true,
+            "reason": "echoes a detail from the review"
+          },
+          {
+            "name": "brand_fit",
+            "status": "pass",
+            "passed": true,
+            "reason": "no banned terms"
+          },
+          {
+            "name": "naturalness",
+            "status": "pass",
+            "passed": true,
+            "reason": "reads naturally"
+          },
+          {
+            "name": "local_seo",
+            "status": "pass",
+            "passed": true,
+            "reason": "keyword use within limits"
+          },
+          {
+            "name": "no_fabrication",
+            "status": "pass",
+            "passed": true,
+            "reason": "every claim traces to review or brand"
+          },
+          {
+            "name": "duplication",
+            "status": "pass",
+            "passed": true,
+            "reason": "no near-duplicate found"
+          },
+          {
+            "name": "approval_compliance",
+            "status": "pass",
+            "passed": true,
+            "reason": "safe for the approval policy"
+          }
+        ],
+        "failed": [],
+        "warnings": []
+      },
+      "validation_reason": "ok",
+      "duplicate": {
+        "status": "pass",
+        "max_similarity": 0.0,
+        "checked": 0,
+        "reasons": [],
+        "matched_index": null
+      },
+      "max_jaccard": 0.0,
+      "status_match": true
+    },
+    {
+      "id": "case-02",
+      "label": "5-star Vietnamese (loc-005)",
+      "fixture": "reviews_loc005_vi_page1.json",
+      "reviewId": "r-5001",
+      "location_id": "accounts/1001/locations/loc-005",
+      "brand_key": "accounts/1001/locations/loc-005",
+      "brand_complete": true,
+      "stars": 5,
+      "language": "vi",
+      "is_sensitive": false,
+      "signals": [],
+      "is_rating_only": false,
+      "requires_manual_approval": false,
+      "review_snippet": "Tiệm làm móng rất đẹp, nhân viên dễ thương và chu đáo. Tôi rất hài lòng và sẽ quay lại.",
+      "expected_status": "draft",
+      "actual_status": "draft",
+      "generation_status": "ok",
+      "error": null,
+      "message": null,
+      "attempts": 1,
+      "repair_used": false,
+      "reply": "Thật tuyệt vời khi biết bạn hài lòng với không gian tiệm và sự chu đáo của nhân viên. Đó là động lực để chúng tôi tiếp tục cố gắng mỗi ngày. Rất mong được đón tiếp bạn trong lần ghé thăm tới, dù là dịch vụ manicure hay pedicure.",
+      "validation": {
+        "ok": true,
+        "checks": [
+          {
+            "name": "relevance",
+            "status": "pass",
+            "passed": true,
+            "reason": "echoes a detail from the review"
+          },
+          {
+            "name": "brand_fit",
+            "status": "pass",
+            "passed": true,
+            "reason": "no banned terms"
+          },
+          {
+            "name": "naturalness",
+            "status": "pass",
+            "passed": true,
+            "reason": "reads naturally"
+          },
+          {
+            "name": "local_seo",
+            "status": "pass",
+            "passed": true,
+            "reason": "keyword use within limits"
+          },
+          {
+            "name": "no_fabrication",
+            "status": "pass",
+            "passed": true,
+            "reason": "every claim traces to review or brand"
+          },
+          {
+            "name": "duplication",
+            "status": "pass",
+            "passed": true,
+            "reason": "no near-duplicate found"
+          },
+          {
+            "name": "approval_compliance",
+            "status": "pass",
+            "passed": true,
+            "reason": "safe for the approval policy"
+          }
+        ],
+        "failed": [],
+        "warnings": []
+      },
+      "validation_reason": "ok",
+      "duplicate": {
+        "status": "pass",
+        "max_similarity": 0.0,
+        "checked": 0,
+        "reasons": [],
+        "matched_index": null
+      },
+      "max_jaccard": 0.0,
+      "status_match": true
+    },
+    {
+      "id": "case-03",
+      "label": "4-star with mild complaint",
+      "fixture": "reviews_page1.json",
+      "reviewId": "r-1003",
+      "location_id": "accounts/1001/locations/loc-001",
+      "brand_key": "accounts/1001/locations/loc-001",
+      "brand_complete": true,
+      "stars": 4,
+      "language": "en",
+      "is_sensitive": false,
+      "signals": [],
+      "is_rating_only": false,
+      "requires_manual_approval": false,
+      "review_snippet": "Great job on my pedicure, though I waited about 20 minutes.",
+      "expected_status": "draft",
+      "actual_status": "draft",
+      "generation_status": "ok",
+      "error": null,
+      "message": null,
+      "attempts": 1,
+      "repair_used": false,
+      "reply": "Thanks for the kind words about your pedicure. We're sorry about the 20-minute wait — we know your time is valuable, and we're always working to keep things running smoothly at our nail salon. We'd love to welcome you back for another visit soon.",
+      "validation": {
+        "ok": true,
+        "checks": [
+          {
+            "name": "relevance",
+            "status": "pass",
+            "passed": true,
+            "reason": "echoes a detail from the review"
+          },
+          {
+            "name": "brand_fit",
+            "status": "pass",
+            "passed": true,
+            "reason": "no banned terms"
+          },
+          {
+            "name": "naturalness",
+            "status": "pass",
+            "passed": true,
+            "reason": "reads naturally"
+          },
+          {
+            "name": "local_seo",
+            "status": "pass",
+            "passed": true,
+            "reason": "keyword use within limits"
+          },
+          {
+            "name": "no_fabrication",
+            "status": "pass",
+            "passed": true,
+            "reason": "every claim traces to review or brand"
+          },
+          {
+            "name": "duplication",
+            "status": "pass",
+            "passed": true,
+            "reason": "no near-duplicate found"
+          },
+          {
+            "name": "approval_compliance",
+            "status": "pass",
+            "passed": true,
+            "reason": "safe for the approval policy"
+          }
+        ],
+        "failed": [],
+        "warnings": []
+      },
+      "validation_reason": "ok",
+      "duplicate": {
+        "status": "pass",
+        "max_similarity": 0.0099,
+        "checked": 1,
+        "reasons": [],
+        "matched_index": 0
+      },
+      "max_jaccard": 0.0099,
+      "status_match": true
+    },
+    {
+      "id": "case-04",
+      "label": "3-star",
+      "fixture": "reviews_page1.json",
+      "reviewId": "r-1007",
+      "location_id": "accounts/1001/locations/loc-001",
+      "brand_key": "accounts/1001/locations/loc-001",
+      "brand_complete": true,
+      "stars": 3,
+      "language": "en",
+      "is_sensitive": false,
+      "signals": [],
+      "is_rating_only": false,
+      "requires_manual_approval": false,
+      "review_snippet": "It was okay, nothing special. The wait was fine but the finish chipped fast.",
+      "expected_status": "draft",
+      "actual_status": "draft",
+      "generation_status": "ok",
+      "error": null,
+      "message": null,
+      "attempts": 1,
+      "repair_used": false,
+      "reply": "Thanks for the honest feedback. It's good to hear the wait didn't hold you up, but a finish that chips quickly isn't the result we want you leaving with — that's worth a closer look on our end. If you're willing, please get in touch through our official contact channel and let us know when you came in, so we can review how your manicure was finished and what might have caused the chipping. We'd genuinely like to hear more.",
+      "validation": {
+        "ok": true,
+        "checks": [
+          {
+            "name": "relevance",
+            "status": "pass",
+            "passed": true,
+            "reason": "echoes a detail from the review"
+          },
+          {
+            "name": "brand_fit",
+            "status": "pass",
+            "passed": true,
+            "reason": "no banned terms"
+          },
+          {
+            "name": "naturalness",
+            "status": "pass",
+            "passed": true,
+            "reason": "reads naturally"
+          },
+          {
+            "name": "local_seo",
+            "status": "pass",
+            "passed": true,
+            "reason": "keyword use within limits"
+          },
+          {
+            "name": "no_fabrication",
+            "status": "pass",
+            "passed": true,
+            "reason": "every claim traces to review or brand"
+          },
+          {
+            "name": "duplication",
+            "status": "pass",
+            "passed": true,
+            "reason": "no near-duplicate found"
+          },
+          {
+            "name": "approval_compliance",
+            "status": "pass",
+            "passed": true,
+            "reason": "safe for the approval policy"
+          }
+        ],
+        "failed": [],
+        "warnings": []
+      },
+      "validation_reason": "ok",
+      "duplicate": {
+        "status": "pass",
+        "max_similarity": 0.0,
+        "checked": 2,
+        "reasons": [],
+        "matched_index": null
+      },
+      "max_jaccard": 0.0,
+      "status_match": true
+    },
+    {
+      "id": "case-05",
+      "label": "2-star downgrade case",
+      "fixture": "reviews_page2.json",
+      "reviewId": "r-1011",
+      "location_id": "accounts/1001/locations/loc-001",
+      "brand_key": "accounts/1001/locations/loc-001",
+      "brand_complete": true,
+      "stars": 2,
+      "language": "en",
+      "is_sensitive": false,
+      "signals": [],
+      "is_rating_only": false,
+      "requires_manual_approval": true,
+      "review_snippet": "Loved the nail art design, I will definitely come back. (downgraded: design chipped within two days)",
+      "expected_status": "needs_review",
+      "actual_status": "needs_review",
+      "generation_status": "ok",
+      "error": null,
+      "message": null,
+      "attempts": 1,
+      "repair_used": false,
+      "reply": "We're so glad you loved the nail art design — that's wonderful to hear. But we're sorry it chipped within two days; that's not the quality we aim for. Please reach out to us through our official contact channel so we can look into this with you. We appreciate you sharing your experience and hope to welcome you back to our nail salon.",
+      "validation": {
+        "ok": true,
+        "checks": [
+          {
+            "name": "relevance",
+            "status": "pass",
+            "passed": true,
+            "reason": "echoes a detail from the review"
+          },
+          {
+            "name": "brand_fit",
+            "status": "pass",
+            "passed": true,
+            "reason": "no banned terms"
+          },
+          {
+            "name": "naturalness",
+            "status": "pass",
+            "passed": true,
+            "reason": "reads naturally"
+          },
+          {
+            "name": "local_seo",
+            "status": "pass",
+            "passed": true,
+            "reason": "keyword use within limits"
+          },
+          {
+            "name": "no_fabrication",
+            "status": "pass",
+            "passed": true,
+            "reason": "every claim traces to review or brand"
+          },
+          {
+            "name": "duplication",
+            "status": "pass",
+            "passed": true,
+            "reason": "no near-duplicate found"
+          },
+          {
+            "name": "approval_compliance",
+            "status": "pass",
+            "passed": true,
+            "reason": "safe for the approval policy"
+          }
+        ],
+        "failed": [],
+        "warnings": []
+      },
+      "validation_reason": "ok",
+      "duplicate": {
+        "status": "pass",
+        "max_similarity": 0.0252,
+        "checked": 3,
+        "reasons": [],
+        "matched_index": 0
+      },
+      "max_jaccard": 0.0252,
+      "status_match": true
+    },
+    {
+      "id": "case-06",
+      "label": "1-star negative",
+      "fixture": "reviews_page2.json",
+      "reviewId": "r-1004",
+      "location_id": "accounts/1001/locations/loc-001",
+      "brand_key": "accounts/1001/locations/loc-001",
+      "brand_complete": true,
+      "stars": 1,
+      "language": "en",
+      "is_sensitive": false,
+      "signals": [],
+      "is_rating_only": false,
+      "requires_manual_approval": true,
+      "review_snippet": "Terrible experience. They chipped my nails the same day and the staff was rude.",
+      "expected_status": "needs_review",
+      "actual_status": "needs_review",
+      "generation_status": "ok",
+      "error": null,
+      "message": null,
+      "attempts": 1,
+      "repair_used": false,
+      "reply": "Chipping the same day you had them done — and feeling unwelcome on top of that — is hard to read, and we're sorry. Nobody should leave here with a rushed finish or with the sense that they were brushed off. If you're willing, please reach out to us through our official contact channel so we can hear more about what happened during your visit. Thank you for being direct with us.",
+      "validation": {
+        "ok": true,
+        "checks": [
+          {
+            "name": "relevance",
+            "status": "pass",
+            "passed": true,
+            "reason": "echoes a detail from the review"
+          },
+          {
+            "name": "brand_fit",
+            "status": "pass",
+            "passed": true,
+            "reason": "no banned terms"
+          },
+          {
+            "name": "naturalness",
+            "status": "pass",
+            "passed": true,
+            "reason": "reads naturally"
+          },
+          {
+            "name": "local_seo",
+            "status": "pass",
+            "passed": true,
+            "reason": "keyword use within limits"
+          },
+          {
+            "name": "no_fabrication",
+            "status": "pass",
+            "passed": true,
+            "reason": "every claim traces to review or brand"
+          },
+          {
+            "name": "duplication",
+            "status": "pass",
+            "passed": true,
+            "reason": "no near-duplicate found"
+          },
+          {
+            "name": "approval_compliance",
+            "status": "pass",
+            "passed": true,
+            "reason": "safe for the approval policy"
+          }
+        ],
+        "failed": [],
+        "warnings": []
+      },
+      "validation_reason": "ok",
+      "duplicate": {
+        "status": "pass",
+        "max_similarity": 0.082,
+        "checked": 4,
+        "reasons": [],
+        "matched_index": 3
+      },
+      "max_jaccard": 0.082,
+      "status_match": true
+    },
+    {
+      "id": "case-07",
+      "label": "rating-only (no comment)",
+      "fixture": "reviews_page1.json",
+      "reviewId": "r-1002",
+      "location_id": "accounts/1001/locations/loc-001",
+      "brand_key": "accounts/1001/locations/loc-001",
+      "brand_complete": true,
+      "stars": 5,
+      "language": "en",
+      "is_sensitive": false,
+      "signals": [],
+      "is_rating_only": true,
+      "requires_manual_approval": false,
+      "review_snippet": "(rating only, no comment)",
+      "expected_status": "draft",
+      "actual_status": "draft",
+      "generation_status": "ok",
+      "error": null,
+      "message": null,
+      "attempts": 2,
+      "repair_used": true,
+      "reply": "Five stars means a lot — thank you for taking the time to leave that rating. There's no note to go with it, so we'll simply say we hope your last visit left you happy with the result, and we'll keep working to make every appointment feel that way. Whenever you're ready for your next manicure, we'd be glad to see you again.",
+      "validation": {
+        "ok": true,
+        "checks": [
+          {
+            "name": "relevance",
+            "status": "pass",
+            "passed": true,
+            "reason": "rating-only review"
+          },
+          {
+            "name": "brand_fit",
+            "status": "pass",
+            "passed": true,
+            "reason": "no banned terms"
+          },
+          {
+            "name": "naturalness",
+            "status": "pass",
+            "passed": true,
+            "reason": "reads naturally"
+          },
+          {
+            "name": "local_seo",
+            "status": "pass",
+            "passed": true,
+            "reason": "keyword use within limits"
+          },
+          {
+            "name": "no_fabrication",
+            "status": "pass",
+            "passed": true,
+            "reason": "every claim traces to review or brand"
+          },
+          {
+            "name": "duplication",
+            "status": "pass",
+            "passed": true,
+            "reason": "no near-duplicate found"
+          },
+          {
+            "name": "approval_compliance",
+            "status": "pass",
+            "passed": true,
+            "reason": "safe for the approval policy"
+          }
+        ],
+        "failed": [],
+        "warnings": []
+      },
+      "validation_reason": "ok",
+      "duplicate": {
+        "status": "pass",
+        "max_similarity": 0.0,
+        "checked": 5,
+        "reasons": [],
+        "matched_index": null
+      },
+      "max_jaccard": 0.0,
+      "status_match": true
+    },
+    {
+      "id": "case-08",
+      "label": "review naming a staff member",
+      "fixture": "reviews_page2.json",
+      "reviewId": "r-1006",
+      "location_id": "accounts/1001/locations/loc-001",
+      "brand_key": "accounts/1001/locations/loc-001",
+      "brand_complete": true,
+      "stars": 5,
+      "language": "en",
+      "is_sensitive": false,
+      "signals": [],
+      "is_rating_only": false,
+      "requires_manual_approval": false,
+      "review_snippet": "Anna is the sweetest — she did an amazing job and my nails look flawless.",
+      "expected_status": "draft",
+      "actual_status": "draft",
+      "generation_status": "ok",
+      "error": null,
+      "message": null,
+      "attempts": 1,
+      "repair_used": false,
+      "reply": "Anna will be so happy to read this — thank you for taking a moment to share it. Hearing that your nails came out flawless is exactly the kind of note we love passing along to the team, and it's lovely that her warmth stood out to you as much as the finished set. Whenever you're ready for your next manicure, we'd be glad to have you back in the chair.",
+      "validation": {
+        "ok": true,
+        "checks": [
+          {
+            "name": "relevance",
+            "status": "pass",
+            "passed": true,
+            "reason": "echoes a detail from the review"
+          },
+          {
+            "name": "brand_fit",
+            "status": "pass",
+            "passed": true,
+            "reason": "no banned terms"
+          },
+          {
+            "name": "naturalness",
+            "status": "pass",
+            "passed": true,
+            "reason": "reads naturally"
+          },
+          {
+            "name": "local_seo",
+            "status": "pass",
+            "passed": true,
+            "reason": "keyword use within limits"
+          },
+          {
+            "name": "no_fabrication",
+            "status": "pass",
+            "passed": true,
+            "reason": "every claim traces to review or brand"
+          },
+          {
+            "name": "duplication",
+            "status": "pass",
+            "passed": true,
+            "reason": "no near-duplicate found"
+          },
+          {
+            "name": "approval_compliance",
+            "status": "pass",
+            "passed": true,
+            "reason": "safe for the approval policy"
+          }
+        ],
+        "failed": [],
+        "warnings": []
+      },
+      "validation_reason": "ok",
+      "duplicate": {
+        "status": "pass",
+        "max_similarity": 0.0894,
+        "checked": 6,
+        "reasons": [],
+        "matched_index": 5
+      },
+      "max_jaccard": 0.0894,
+      "status_match": true
+    },
+    {
+      "id": "case-09",
+      "label": "review of a DIFFERENT shop (loc-002, brand isolation)",
+      "fixture": "reviews_loc002_page1.json",
+      "reviewId": "r-2001",
+      "location_id": "accounts/1001/locations/loc-002",
+      "brand_key": "accounts/1001/locations/loc-002",
+      "brand_complete": false,
+      "stars": 5,
+      "language": "en",
+      "is_sensitive": false,
+      "signals": [],
+      "is_rating_only": false,
+      "requires_manual_approval": false,
+      "review_snippet": "Wonderful acrylics, very neat work at the San Jose shop.",
+      "expected_status": "draft",
+      "actual_status": "draft",
+      "generation_status": "ok",
+      "error": null,
+      "message": null,
+      "attempts": 1,
+      "repair_used": false,
+      "reply": "Neat, precise acrylics are what we aim for every time, so it's lovely to hear that's exactly what you got at our San Jose shop. Thanks for the kind words — we'd be glad to have you back in the chair whenever you're ready.",
+      "validation": {
+        "ok": true,
+        "checks": [
+          {
+            "name": "relevance",
+            "status": "pass",
+            "passed": true,
+            "reason": "echoes a detail from the review"
+          },
+          {
+            "name": "brand_fit",
+            "status": "pass",
+            "passed": true,
+            "reason": "no banned terms"
+          },
+          {
+            "name": "naturalness",
+            "status": "pass",
+            "passed": true,
+            "reason": "reads naturally"
+          },
+          {
+            "name": "local_seo",
+            "status": "pass",
+            "passed": true,
+            "reason": "keyword use within limits"
+          },
+          {
+            "name": "no_fabrication",
+            "status": "pass",
+            "passed": true,
+            "reason": "every claim traces to review or brand"
+          },
+          {
+            "name": "duplication",
+            "status": "pass",
+            "passed": true,
+            "reason": "no near-duplicate found"
+          },
+          {
+            "name": "approval_compliance",
+            "status": "pass",
+            "passed": true,
+            "reason": "safe for the approval policy"
+          }
+        ],
+        "failed": [],
+        "warnings": []
+      },
+      "validation_reason": "ok",
+      "duplicate": {
+        "status": "pass",
+        "max_similarity": 0.0,
+        "checked": 0,
+        "reasons": [],
+        "matched_index": null
+      },
+      "max_jaccard": 0.0,
+      "status_match": true
+    },
+    {
+      "id": "case-10",
+      "label": "sensitive review (health)",
+      "fixture": "reviews_sensitive.json",
+      "reviewId": "r-3001",
+      "location_id": "accounts/1001/locations/loc-001",
+      "brand_key": "accounts/1001/locations/loc-001",
+      "brand_complete": true,
+      "stars": 1,
+      "language": "en",
+      "is_sensitive": true,
+      "signals": [
+        "health"
+      ],
+      "is_rating_only": false,
+      "requires_manual_approval": true,
+      "review_snippet": "I got a serious infection after my pedicure here, my foot was bleeding. They clearly do not sterilize their tools.",
+      "expected_status": "needs_review",
+      "actual_status": "needs_review",
+      "generation_status": "ok",
+      "error": null,
+      "message": null,
+      "attempts": 1,
+      "repair_used": false,
+      "reply": "We're truly sorry to read this — a foot bleeding after a pedicure is something no one should have to deal with, and we understand how worrying that must have been. Your health comes first, so please see a medical professional if you haven't already. We take concerns like this seriously and would like to look into what happened, so please contact us directly through our official salon contact channel and ask for the manager. Thank you for telling us.",
+      "validation": {
+        "ok": true,
+        "checks": [
+          {
+            "name": "relevance",
+            "status": "pass",
+            "passed": true,
+            "reason": "echoes a detail from the review"
+          },
+          {
+            "name": "brand_fit",
+            "status": "pass",
+            "passed": true,
+            "reason": "no banned terms"
+          },
+          {
+            "name": "naturalness",
+            "status": "pass",
+            "passed": true,
+            "reason": "reads naturally"
+          },
+          {
+            "name": "local_seo",
+            "status": "pass",
+            "passed": true,
+            "reason": "keyword use within limits"
+          },
+          {
+            "name": "no_fabrication",
+            "status": "pass",
+            "passed": true,
+            "reason": "every claim traces to review or brand"
+          },
+          {
+            "name": "duplication",
+            "status": "pass",
+            "passed": true,
+            "reason": "no near-duplicate found"
+          },
+          {
+            "name": "approval_compliance",
+            "status": "pass",
+            "passed": true,
+            "reason": "safe for the approval policy"
+          }
+        ],
+        "failed": [],
+        "warnings": []
+      },
+      "validation_reason": "ok",
+      "duplicate": {
+        "status": "pass",
+        "max_similarity": 0.0,
+        "checked": 7,
+        "reasons": [],
+        "matched_index": null
+      },
+      "max_jaccard": 0.0,
+      "status_match": true
+    }
+  ]
+}

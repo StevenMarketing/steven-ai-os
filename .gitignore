@@ -1,0 +1,87 @@
+# Steven AI OS — .gitignore
+# Nothing secret, private or generated may ever reach the repository.
+
+# --- secrets / credentials ------------------------------------------------
+.env
+.env.*
+*.env
+!.env.example
+.envrc
+auth.json
+credentials.json
+credentials*.json
+secrets.json
+secrets.yml
+secrets.yaml
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa*
+id_ed25519*
+id_ecdsa*
+*_rsa
+*_ed25519
+.gbp/
+token.json
+client_secret*.json
+
+# --- databases (real data lives outside the repo) -------------------------
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+gbp_ui.db*
+
+# --- sessions / cookies / runtime state -----------------------------------
+sessions/
+cookies.txt
+*.cookie
+state.db*
+
+# --- logs, cache, temporary files -----------------------------------------
+*.log
+logs/
+cache/
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.tox/
+*.tmp
+*.temp
+tmp/
+.DS_Store
+Thumbs.db
+
+# --- backups and archives -------------------------------------------------
+backups/
+*.bak
+*.backup
+*.orig
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+
+# --- environments / editors ----------------------------------------------
+.venv/
+venv/
+env/
+ENV/
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# --- customer / private data ---------------------------------------------
+customer_data/
+customers/
+data/private/
+*.private.json
+*.pii
