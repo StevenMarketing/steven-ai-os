@@ -1,0 +1,14 @@
+{
+  "2": {
+    "reason": "Issue #2 was closed at 2026-10-16T05:15:23Z, before the budget gate existed on main (PR #5 merged 2026-10-16T06:45:08Z). That run genuinely did not pass through the gate. Nothing has been backfilled and no ledger row was invented; the run stays visible in processed_today and is listed here as an acknowledged exception.",
+    "evidence": {
+      "issue": "https://github.com/StevenMarketing/steven-ai-os/issues/2",
+      "pr": "https://github.com/StevenMarketing/steven-ai-os/pull/4",
+      "worker_finished_at": "2026-10-16T05:15:23Z",
+      "gate_landed_on_main_at": "2026-10-16T06:45:08Z",
+      "first_gate_proven_run": "issue #7 at 2026-10-16T07:02:28Z (settled, audit green for #7)"
+    },
+    "acknowledged_by": "StevenMarketing (repository owner) — taking effect when the pull request that adds this file is merged",
+    "scope": "pre-gate exceptions only; never matches a new issue"
+  }
+}

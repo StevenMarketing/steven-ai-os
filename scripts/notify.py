@@ -112,14 +112,82 @@ def redact_safe(text: str) -> str:
     return text
 
 
+def delivery_log_path(state_dir: Optional[str] = None) -> str:
+    """Đường dẫn sổ gửi. `STEVEN_NOTIFY_LEDGER_FILE` cho phép test cô lập hoàn toàn."""
+    override = os.environ.get("STEVEN_NOTIFY_LEDGER_FILE")
+    if override:
+        return override
+    return os.path.join(state_dir or budget.default_state_dir(), "notify-delivery.jsonl")
+
+
+def record_delivery(text: str, ok: bool, returncode: Optional[int] = None,
+                    state_dir: Optional[str] = None, label: Optional[str] = None,
+                    event: Optional[str] = None, now: Optional[float] = None) -> Dict[str, Any]:
+    """Ghi **kết quả gửi** (không ghi nội dung): phát hiện lỗi gửi và gửi trùng.
+
+    Sổ này là nguồn sự thật để trả lời "tin đã đi chưa / đi mấy lần", thứ mà trước đây
+    không có. Chỉ lưu: thời điểm, nhãn, băm nội dung, độ dài, mã trả về — **không** lưu
+    nội dung tin nên không thể lộ bí mật qua sổ này.
+    """
+    import hashlib
+    stamp = time.gmtime(now if now is not None else time.time())
+    row = {
+        "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", stamp),
+        "day": time.strftime("%Y-%m-%d", stamp),
+        "label": label, "event": event,
+        "ok": bool(ok), "returncode": returncode,
+        "sha": hashlib.sha256((text or "").encode("utf-8")).hexdigest()[:12],
+        "chars": len(text or ""),
+    }
+    path = delivery_log_path(state_dir)
+    try:
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(row, sort_keys=True) + "\n")
+    except OSError as exc:
+        row["log_error"] = type(exc).__name__
+    return row
+
+
+def audit_deliveries(state_dir: Optional[str] = None,
+                     day: Optional[str] = None) -> Dict[str, Any]:
+    """Đọc sổ gửi: lần gửi lỗi và nội dung bị gửi lặp trong cùng ngày."""
+    day = day or time.strftime("%Y-%m-%d", time.gmtime())
+    rows: list = []
+    try:
+        with open(delivery_log_path(state_dir), "r", encoding="utf-8") as handle:
+            for line in handle:
+                try:
+                    rows.append(json.loads(line))
+                except ValueError:
+                    continue
+    except OSError:
+        pass
+    today = [r for r in rows if r.get("day") == day]
+    failures = [r for r in today if not r.get("ok")]
+    seen: Dict[str, int] = {}
+    for row in today:
+        if row.get("ok"):
+            seen[row.get("sha")] = seen.get(row.get("sha"), 0) + 1
+    duplicates = {sha: count for sha, count in seen.items() if count > 1}
+    return {"day": day, "sent": len(today), "failures": failures,
+            "duplicate_hashes": duplicates,
+            "ok": not failures and not duplicates,
+            "note": ("failures = tin KHÔNG gửi được; duplicate_hashes = cùng nội dung gửi "
+                     "nhiều lần trong ngày.")}
+
+
 def send(text: str, *, target: str = "telegram", dry_run: bool = False,
-         runner: Optional[Runner] = None) -> Dict[str, Any]:
+         runner: Optional[Runner] = None, state_dir: Optional[str] = None,
+         label: Optional[str] = None, event: Optional[str] = None) -> Dict[str, Any]:
     safe = redact_safe(text)
     if dry_run:
         return {"ok": True, "dry_run": True, "message": safe}
     runner = runner or default_runner
     result = runner(["-t", target, safe])
     result["message"] = safe
+    result["delivery"] = record_delivery(safe, bool(result.get("ok")),
+                                        result.get("returncode"), state_dir, label, event)
     return result
 
 
@@ -186,9 +254,20 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--state-dir", default=budget.default_state_dir())
     parser.add_argument("--check-thresholds", action="store_true",
                         help="chỉ gửi nếu vượt mốc 80%%/100%% chưa thông báo")
+    parser.add_argument("--audit-deliveries", action="store_true",
+                        help="đọc sổ gửi: lần gửi lỗi và nội dung gửi lặp trong ngày")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
+
+    if args.audit_deliveries:
+        report = audit_deliveries(args.state_dir)
+        if args.json:
+            print(json.dumps(report, indent=2, sort_keys=True, default=str))
+        else:
+            print(f"ngày {report['day']}: đã gửi {report['sent']} · lỗi "
+                  f"{len(report['failures'])} · nội dung trùng {report['duplicate_hashes']}")
+        return 0 if report["ok"] else 1
 
     if args.event == "budget" and args.check_thresholds:
         guard = budget.BudgetGuard(args.state_dir)
