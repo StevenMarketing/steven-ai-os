@@ -317,5 +317,42 @@ class MultiKeyTests(unittest.TestCase):
         self.assertIn("OPENROUTER_API_KEY", info["error"])
 
 
+    def test_the_worker_key_can_be_read_from_the_worker_profiles_env_file(self):
+        """Khoá worker nằm trong .env của profile worker ⇒ vẫn cộng được vào trần hệ thống."""
+        os.environ["STEVEN_WORKER_ENV_FILE"] = "/opt/data/profiles/worker-agent/.env"
+        self.addCleanup(os.environ.pop, "STEVEN_WORKER_ENV_FILE", None)
+        budget.read_env_value = lambda name, path=None, *a, **k: (
+            {"OPENROUTER_API_KEY": "chat-secret-value"}.get(name) if path is None
+            else ("worker-secret-value" if name == "OPENROUTER_API_KEY" else None))
+        info = budget.provider_usage()
+        self.assertEqual(info["keys_read"], ["worker", "chat"])
+        self.assertAlmostEqual(info["usage_daily_usd"], 2.25, places=6)
+        blob = json.dumps(info)
+        self.assertNotIn("worker-secret-value", blob)
+        self.assertNotIn("chat-secret-value", blob)
+
+    def test_a_worker_profile_without_a_key_falls_back_to_the_chat_key_only(self):
+        os.environ["STEVEN_WORKER_ENV_FILE"] = "/opt/data/profiles/worker-agent/.env"
+        self.addCleanup(os.environ.pop, "STEVEN_WORKER_ENV_FILE", None)
+        budget.read_env_value = lambda name, path=None, *a, **k: (
+            "chat-secret-value" if name == "OPENROUTER_API_KEY" and path is None else None)
+        info = budget.provider_usage()
+        self.assertEqual(info["keys_read"], ["chat"])
+        self.assertAlmostEqual(info["usage_daily_usd"], 2.0, places=6)
+
+    def test_worker_key_usage_names_the_worker_profile_env_file(self):
+        budget.read_env_value = lambda name, path=None, *a, **k: None
+        usage = budget.worker_key_usage()
+        self.assertFalse(usage["configured"])
+        self.assertIn("worker-agent", usage["worker_env_file"])
+        self.assertIn("OPENROUTER_API_KEY", usage["error"])
+
+    def test_the_whole_report_carries_no_key_values(self):
+        blob = json.dumps({"usage": budget.provider_usage(),
+                           "worker": budget.worker_key_usage()})
+        for leaked in ("worker-secret-value", "chat-secret-value", "sk-or-v1"):
+            self.assertNotIn(leaked, blob)
+
+
 if __name__ == "__main__":
     unittest.main()

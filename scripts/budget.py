@@ -285,18 +285,29 @@ def _aggregate_keys(parts: List[Dict[str, Any]]) -> Dict[str, Any]:
 
 def worker_key_usage(token: Optional[str] = None,
                      transport: Optional[Transport] = None) -> Dict[str, Any]:
-    """Số của **riêng khoá worker** (nếu có). Dùng để biết hạn mức cứng của worker."""
+    """Số của **riêng khoá worker** (nếu có). Dùng để biết hạn mức cứng của worker.
+
+    Khoá worker được tìm theo thứ tự: biến `WORKER_OPENROUTER_API_KEY`, rồi tới
+    `OPENROUTER_API_KEY` trong file `.env` của profile worker
+    (`STEVEN_WORKER_ENV_FILE`, mặc định `/opt/data/profiles/worker-agent/.env`).
+    """
+    default_worker_env = "/opt/data/profiles/worker-agent/.env"
+    worker_file = os.environ.get("STEVEN_WORKER_ENV_FILE", default_worker_env)
     secret = token or read_env_value("WORKER_OPENROUTER_API_KEY")
+    if not secret and worker_file:
+        secret = read_env_value("OPENROUTER_API_KEY", worker_file)
     if not secret:
         return {"ok": False, "role": "worker", "configured": False,
-                "error": "chưa cấu hình WORKER_OPENROUTER_API_KEY (worker đang dùng khoá chung)"}
+                "worker_env_file": worker_file,
+                "error": ("chưa cấu hình khoá worker: đặt OPENROUTER_API_KEY trong "
+                          f"{worker_file} (hoặc WORKER_OPENROUTER_API_KEY)")}
     try:
         payload = (transport or http_get_json)(OPENROUTER_URL, secret)
     except Exception as exc:                                  # noqa: BLE001
         return {"ok": False, "role": "worker", "configured": True,
-                "error": type(exc).__name__}
+                "worker_env_file": worker_file, "error": type(exc).__name__}
     parsed = _parse_provider_payload(payload, source="provider-confirmed (worker key)")
-    return {**parsed, "role": "worker", "configured": True}
+    return {**parsed, "role": "worker", "configured": True, "worker_env_file": worker_file}
 
 
 def provider_usage(token: Optional[str] = None, transport: Optional[Transport] = None,
@@ -323,8 +334,16 @@ def provider_usage(token: Optional[str] = None, transport: Optional[Transport] =
         return _parse_provider_payload(payload, source="provider-file")
     if token is None and transport is None and env_file is None:
         parts: List[Dict[str, Any]] = []
+        worker_file = os.environ.get("STEVEN_WORKER_ENV_FILE")
         for role, name in KEY_ROLES:
-            secret = read_env_value(name)
+            if role == "worker":
+                # Khoá worker có thể nằm ở biến riêng, hoặc trong .env của profile worker
+                # (nơi nó được đặt tên OPENROUTER_API_KEY cho inference). Chỉ đọc, không in.
+                secret = read_env_value("WORKER_OPENROUTER_API_KEY")
+                if not secret and worker_file:
+                    secret = read_env_value("OPENROUTER_API_KEY", worker_file)
+            else:
+                secret = read_env_value(name)
             if not secret:
                 continue
             try:
@@ -336,7 +355,10 @@ def provider_usage(token: Optional[str] = None, transport: Optional[Transport] =
         if parts:
             return _aggregate_keys(parts)
         return {"ok": False,
-                "error": f"không tìm thấy khoá nào trong {', '.join(KEY_NAMES)}"}
+                "error": (f"không tìm thấy khoá nào trong {', '.join(KEY_NAMES)}"
+                          + (f" (đã thử đọc {os.path.basename(worker_file)} cho vai trò worker)"
+                             if worker_file else
+                             " (chưa đặt STEVEN_WORKER_ENV_FILE cho khoá worker)"))}
     if transport is None:
         secret = token if token is not None else read_env_value("OPENROUTER_API_KEY", env_file)
         if not secret:
