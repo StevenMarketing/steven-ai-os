@@ -61,7 +61,7 @@ def default_runner(args: Sequence[str]) -> Dict[str, Any]:
         return {"ok": False, "error": type(exc).__name__}
 
 
-def build_message(event: str, **fields: Any) -> str:
+def _build_message_body(event: str, **fields: Any) -> str:
     """Soạn tin nhắn. Chỉ dùng các trường cho phép — không có chỗ cho bí mật."""
     issue = fields.get("issue")
     pr = fields.get("pr")
@@ -132,6 +132,21 @@ def delivery_log_path(state_dir: Optional[str] = None) -> str:
         return override
     return os.path.join(state_dir or budget.default_state_dir(), "notify-delivery.jsonl")
 
+
+def _stamp_gmt7(stamp: Optional[float] = None) -> str:
+    """Mốc hiển thị theo GMT+7 (Asia/Ho_Chi_Minh) cho mọi thông báo.
+
+    Mốc reset ngân sách của provider vẫn theo UTC (00:00 UTC = 07:00 GMT+7), nên phần
+    ngân sách nói rõ UTC để không ai hiểu nhầm giờ reset.
+    """
+    t = time.gmtime((stamp if stamp is not None else time.time()) + 7 * 3600)
+    return "🕒 %s GMT+7" % time.strftime("%Y-%m-%d %H:%M", t)
+
+
+def build_message(event: str, **fields: Any) -> str:
+    """Nội dung tin + mốc giờ GMT+7 (giữ nguyên phần thân ở ``_build_message_body``)."""
+    body = _build_message_body(event, **fields)
+    return "%s\n%s" % (body, _stamp_gmt7(fields.get("now")))
 
 def record_delivery(text: str, ok: bool, returncode: Optional[int] = None,
                     state_dir: Optional[str] = None, label: Optional[str] = None,
