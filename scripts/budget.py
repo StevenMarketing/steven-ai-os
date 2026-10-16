@@ -43,8 +43,8 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 # --------------------------------------------------------------------------
 # Trần ngân sách (đọc từ môi trường; code KHÔNG bao giờ tự tăng)
 # --------------------------------------------------------------------------
-DEFAULT_DAILY_USD = 3.00          # trần hệ thống đang áp dụng; đổi lên 4.00 (chat $3 + worker $1)
-#                                   cần cập nhật các test hardcode $3 trước — xem báo cáo
+DEFAULT_DAILY_USD = 4.00          # trần toàn hệ thống do chủ sở hữu phê duyệt:
+#                                   chat $3/ngày + worker $1/ngày (đều reset daily ở provider)
 DEFAULT_TASK_USD = 0.60           # trần cho một task đơn lẻ
 DEFAULT_MAX_ATTEMPTS = 3          # chống vòng lặp đốt token
 OPENROUTER_URL = "https://openrouter.ai/api/v1/key"

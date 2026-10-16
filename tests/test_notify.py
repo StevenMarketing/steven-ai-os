@@ -118,23 +118,23 @@ class ThresholdTests(unittest.TestCase):
         self.assertEqual(notify.notified_today(self.dir, NOW)["sent"], [])
 
     def test_80_and_100_percent_are_each_sent_once(self):
-        result = notify.crossed_thresholds(self.guard, provider(usage_daily=2.5),
+        result = notify.crossed_thresholds(self.guard, provider(usage_daily=self.guard.daily_usd * 0.85),
                                            state_dir=self.dir, now=NOW)
         self.assertEqual([p["label"] for p in result["pending"]], ["budget-80"])
         notify.mark_notified("budget-80", self.dir, NOW)
-        result = notify.crossed_thresholds(self.guard, provider(usage_daily=2.6),
+        result = notify.crossed_thresholds(self.guard, provider(usage_daily=self.guard.daily_usd * 0.88),
                                            state_dir=self.dir, now=NOW)
         self.assertEqual(result["pending"], [])                 # không gửi lại 80%
-        result = notify.crossed_thresholds(self.guard, provider(usage_daily=3.0),
+        result = notify.crossed_thresholds(self.guard, provider(usage_daily=self.guard.daily_usd),
                                            state_dir=self.dir, now=NOW)
         self.assertEqual([p["label"] for p in result["pending"]], ["budget-100"])
         notify.mark_notified("budget-100", self.dir, NOW)
-        result = notify.crossed_thresholds(self.guard, provider(usage_daily=3.4),
+        result = notify.crossed_thresholds(self.guard, provider(usage_daily=self.guard.daily_usd * 1.1),
                                            state_dir=self.dir, now=NOW)
         self.assertEqual(result["pending"], [])
 
     def test_both_thresholds_fire_at_once_when_spend_jumps(self):
-        result = notify.crossed_thresholds(self.guard, provider(usage_daily=3.2),
+        result = notify.crossed_thresholds(self.guard, provider(usage_daily=self.guard.daily_usd * 1.05),
                                            state_dir=self.dir, now=NOW)
         self.assertEqual([p["label"] for p in result["pending"]],
                          ["budget-80", "budget-100"])
@@ -143,14 +143,14 @@ class ThresholdTests(unittest.TestCase):
         notify.mark_notified("budget-80", self.dir, NOW)
         self.assertIn("budget-80", notify.notified_today(self.dir, NOW)["sent"])
         self.assertEqual(notify.notified_today(self.dir, NOW + DAY)["sent"], [])
-        result = notify.crossed_thresholds(self.guard, provider(usage_daily=2.5),
+        result = notify.crossed_thresholds(self.guard, provider(usage_daily=self.guard.daily_usd * 0.85),
                                            state_dir=self.dir, now=NOW + DAY)
         self.assertEqual([p["label"] for p in result["pending"]], ["budget-80"])
 
     def test_the_threshold_check_uses_the_provider_figure(self):
-        result = notify.crossed_thresholds(self.guard, provider(usage_daily=2.9),
+        result = notify.crossed_thresholds(self.guard, provider(usage_daily=self.guard.daily_usd * 0.95),
                                            state_dir=self.dir, now=NOW)
-        self.assertEqual(result["spend_usd"], 2.9)
+        self.assertEqual(result["spend_usd"], self.guard.daily_usd * 0.95)
         self.assertIn("usage_daily", result["basis"])
 
     def test_main_check_thresholds_sends_through_the_injected_runner(self):
@@ -158,7 +158,7 @@ class ThresholdTests(unittest.TestCase):
         original = notify.send
         notify.send = lambda text, **kw: sent.append(text) or {"ok": True, "message": text}
         original_provider = budget.provider_usage
-        budget.provider_usage = lambda *a, **k: provider(usage_daily=2.6)
+        budget.provider_usage = lambda *a, **k: provider(usage_daily=self.guard.daily_usd * 0.88)
         try:
             code = notify.main(["--event", "budget", "--check-thresholds",
                                 "--state-dir", self.dir, "--json"])

@@ -115,10 +115,10 @@ class FullPathTests(IntegrationBase):
         self.assertTrue(again["budget_layer"]["allowed"])        # ngân sách vẫn đủ
 
     def test_other_hermes_sessions_near_the_cap_block_the_worker(self):
-        verdict = self.gate().can_start("43", 0.05, provider=provider(daily=2.99))
+        verdict = self.gate().can_start("43", 0.05, provider=provider(daily=budget.DEFAULT_DAILY_USD - 0.01))
         self.assertFalse(verdict["allowed"])
         self.assertIn("trần ngày", verdict["reason"])
-        self.assertFalse(self.gate().claim("43", 0.05, provider=provider(daily=2.99))["claimed"])
+        self.assertFalse(self.gate().claim("43", 0.05, provider=provider(daily=budget.DEFAULT_DAILY_USD - 0.01))["claimed"])
 
     def test_a_provider_failure_is_fail_closed_at_the_gate(self):
         verdict = self.gate().can_start("44", 0.05,
@@ -206,7 +206,7 @@ class FullPathTests(IntegrationBase):
 class WatchdogIntegrationTests(IntegrationBase):
     def test_enforce_pauses_the_guard_when_the_cap_is_hit(self):
         guard = budget.BudgetGuard(self.budget_dir)
-        guard.record("issue-1", 3.2)
+        guard.record("issue-1", budget.DEFAULT_DAILY_USD + 0.2)
         state = budget_watchdog.evaluate(guard, provider(daily=0.0))
         self.assertTrue(state["over_cap"])
         action = budget_watchdog.enforce(guard, "")           # job_id rỗng: không chạm cron
@@ -223,7 +223,7 @@ class WatchdogIntegrationTests(IntegrationBase):
 
     def test_the_watchdog_detects_the_cap_from_the_ledger_when_the_provider_fails(self):
         guard = budget.BudgetGuard(self.budget_dir)
-        guard.record("issue-1", 3.05)
+        guard.record("issue-1", budget.DEFAULT_DAILY_USD + 0.05)
         state = budget_watchdog.evaluate(guard, provider(ok=False, error="URLError"))
         self.assertTrue(state["over_cap"])
         self.assertTrue(state["counts_local_only"])
