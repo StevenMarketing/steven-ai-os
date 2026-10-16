@@ -149,5 +149,5 @@ hermes -p worker-agent cron pause <job-id>
 hermes -p worker-agent cron remove <job-id>
 ```
 
-Hoàn tác (rollback) là khôi phục bản sao lưu `cron/jobs.json` của profile mặc định.
+Hoàn tác (rollback) việc chuyển cron: giữ worker ở trạng thái PAUSED; dùng bản sao lưu `cron/jobs.json` **của đúng profile `worker-agent`** để khôi phục job worker khi cần. Nếu muốn khôi phục job cũ ở profile mặc định, dùng **bản sao lưu riêng của profile mặc định**. Kiểm tra `hermes -p worker-agent cron list` và `hermes cron list` trước khi bật lại để bảo đảm không có hai worker đồng thời; không ghi đè file cron giữa hai profile.
 
