@@ -23,11 +23,12 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import urllib.error
 import urllib.parse
 import urllib.request
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -56,30 +57,60 @@ def _request(path: str, token: str) -> Any:
 def read_token(token_file: Optional[str]) -> str:
     """Token from the environment, or from a file (``.env`` or a bare token).
 
-    Accepts a ``GITHUB_TOKEN=...`` line so the worker can point at the
-    Hermes ``.env`` (mode 600) directly. The value is never returned in any
-    message, printed, or logged.
+    Accepts a ``GITHUB_TOKEN=...`` line so the worker can point at the Hermes
+    ``.env`` (mode 600) directly. If the file is a dotenv file without that key,
+    this REFUSES instead of guessing -- falling back to the file's whole
+    contents would send every other secret in it as an HTTP header.
+
+    The value is never printed, logged or returned to a caller that reports it.
     """
     token = os.environ.get("GITHUB_TOKEN", "").strip()
     if token:
-        return token
+        return _validated(token)
     if token_file:
         try:
             with open(token_file, "r", encoding="utf-8") as fh:
                 raw = fh.read()
         except OSError as exc:
             raise SystemExit(f"cannot read token file: {exc}")
-        for line in raw.splitlines():
-            key, _, value = line.strip().partition("=")
-            if key.strip() == "GITHUB_TOKEN":
+        lines = [line.strip() for line in raw.splitlines() if line.strip()]
+        for line in lines:
+            key, sep, value = line.partition("=")
+            if sep and key.strip() == "GITHUB_TOKEN":
                 token = value.strip().strip("'\"").strip()
                 break
         if not token:
-            token = raw.strip()
+            if _looks_like_dotenv(lines):
+                raise SystemExit(
+                    f"{token_file} looks like a dotenv file but has no "
+                    "GITHUB_TOKEN= line; refusing to guess (never use a whole "
+                    "env file as a token). Add GITHUB_TOKEN=... or point "
+                    "--token-file at a file that contains only the token.")
+            if len(lines) == 1:
+                token = lines[0]
     if not token:
         raise SystemExit(
             "no GitHub token: set GITHUB_TOKEN in the environment or pass "
             "--token-file (never paste a token into a command line)")
+    return _validated(token)
+
+
+def _looks_like_dotenv(lines: Sequence[str]) -> bool:
+    for line in lines:
+        if line.startswith("#"):
+            continue
+        key, sep, _value = line.partition("=")
+        if sep and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key.strip()):
+            return True
+    return False
+
+
+def _validated(token: str) -> str:
+    """Reject anything that is not a single opaque token value."""
+    if not token or len(token) > 400 or any(ch.isspace() for ch in token):
+        raise SystemExit(
+            "refusing to use a malformed token value (a token is a single line "
+            "of at most 400 characters with no whitespace)")
     return token
 
 

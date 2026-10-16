@@ -218,6 +218,7 @@ has no `Administration` permission, so it cannot apply it itself.
 | Symptom | Cause | Action |
 |---|---|---|
 | `no GitHub token` | no token in env or `.env` | add `GITHUB_TOKEN=` to `/opt/data/.env` (mode 600) |
+| `looks like a dotenv file but has no GITHUB_TOKEN=` | the file is an env file and the key is missing | add the `GITHUB_TOKEN=` line; the worker refuses to use a whole env file as a token, because that would send every other secret in it to GitHub |
 | nothing is picked up | label missing, or applied by a bot | owner applies `hermes-ready` themselves |
 | issue ignored, comment says *needs info* | a required section is missing | fill in the issue template |
 | issue ignored, *injection* | the body trips a tripwire | rewrite the issue; do not put instructions for the agent in it |

@@ -498,7 +498,57 @@ class PollerTests(unittest.TestCase):
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
-    def test_a_bare_token_file_is_still_accepted(self):
+    def test_a_dotenv_file_without_the_key_is_refused_not_guessed(self):
+        """Regression: a whole env file must never be sent as a token.
+
+        The first implementation fell back to ``raw``, so pointing at the
+        Hermes .env with no GITHUB_TOKEN line would have put every other secret
+        in that file into the Authorization header.
+        """
+        tmp = tempfile.mkdtemp(prefix="t-gh-token-")
+        try:
+            path = os.path.join(tmp, ".env")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write("OPENROUTER_API_KEY=some-live-value-0123456789\n"
+                         "TELEGRAM_BOT_TOKEN=another-live-value\n")
+            saved = os.environ.pop("GITHUB_TOKEN", None)
+            try:
+                with self.assertRaises(SystemExit) as ctx:
+                    issue_poller.read_token(path)
+                self.assertIn("no GITHUB_TOKEN=", str(ctx.exception))
+            finally:
+                if saved is not None:
+                    os.environ["GITHUB_TOKEN"] = saved
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_a_multi_line_blob_is_refused(self):
+        tmp = tempfile.mkdtemp(prefix="t-gh-token-")
+        try:
+            path = os.path.join(tmp, "blob")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write("first-line-not-a-token\nsecond-line-not-a-token\n")
+            saved = os.environ.pop("GITHUB_TOKEN", None)
+            try:
+                with self.assertRaises(SystemExit):
+                    issue_poller.read_token(path)
+            finally:
+                if saved is not None:
+                    os.environ["GITHUB_TOKEN"] = saved
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_an_over_long_or_whitespace_token_is_refused(self):
+        for bad in ("x" * 500, "has space inside", "has\nnewline"):
+            with self.assertRaises(SystemExit) as ctx:
+                issue_poller._validated(bad)
+            self.assertIn("malformed", str(ctx.exception))
+
+    def test_a_well_formed_token_passes_validation(self):
+        self.assertEqual(issue_poller._validated("github_pat_abc123"),
+                         "github_pat_abc123")
+
+    def test_a_bare_single_line_token_file_is_still_accepted(self):
         tmp = tempfile.mkdtemp(prefix="t-gh-token-")
         try:
             path = os.path.join(tmp, "token")
@@ -562,12 +612,21 @@ class PrePushHookTests(unittest.TestCase):
 
 class RepositoryHygieneTests(unittest.TestCase):
     def test_the_repo_never_tracks_a_ready_to_run_secret(self):
+        """Production paths must carry no credential shape at all.
+
+        Test fixtures legitimately contain obviously-fake shapes (they are what
+        the redaction/scan tests feed on), so they are excluded here; the
+        blocking check for them is ``issue_guard check-secrets``, which flags
+        test-context findings separately from real ones.
+        """
         result = subprocess.run(["git", "grep", "-nE",
                                  r"sk-or-v1-[A-Za-z0-9]{25,}|ghp_[A-Za-z0-9]{20,}|"
-                                 r"BEGIN [A-Z ]*PRIVATE KEY", "HEAD"],
+                                 r"github_pat_[A-Za-z0-9_]{20,}|"
+                                 r"BEGIN [A-Z ]*PRIVATE KEY",
+                                 "HEAD", "--", ".", ":!tests/", ":!docs/"],
                                 capture_output=True, text=True, cwd=_ROOT)
         hits = [line for line in result.stdout.splitlines() if line.strip()]
-        self.assertEqual(hits, [], f"credential-shaped content in HEAD: {hits}")
+        self.assertEqual(hits, [], f"credential-shaped content in production paths: {hits}")
 
     def test_the_hook_is_versioned_and_executable_or_shell_invocable(self):
         self.assertTrue(os.path.isfile(HOOK))
