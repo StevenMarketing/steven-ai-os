@@ -118,13 +118,18 @@ def exchange_code(
     code: str,
     redirect_uri: str,
     client_secret: Optional[str] = None,
+    code_verifier: Optional[str] = None,
     token_url: str = TOKEN_URL,
     timeout: float = 15.0,
 ) -> Token:
     """Exchange an authorization code for a token over the injected transport.
 
-    Refuses a live transport unless the opt-in is set. The code/secret are put
-    in the request body only -- never logged, never returned.
+    Refuses a live transport unless the opt-in is set. The code, the secret and the
+    PKCE verifier are put in the request body only -- never logged, never returned.
+
+    ``code_verifier`` is the RFC 7636 value that pairs with the ``code_challenge`` sent
+    in the authorization request. When it is omitted the request is the plain
+    authorization-code flow, which a PKCE-protected authorization will reject.
     """
     if not client_id:
         raise ValueError("client_id is required")
@@ -140,6 +145,9 @@ def exchange_code(
     }
     if client_secret:
         body["client_secret"] = str(client_secret)
+    if code_verifier:
+        # RFC 7636 section 4.5: the verifier travels in the token request body.
+        body["code_verifier"] = str(code_verifier)
 
     response = transport.post(token_url, data=body, timeout=timeout)
     status = getattr(response, "status", None)
