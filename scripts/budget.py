@@ -43,7 +43,8 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 # --------------------------------------------------------------------------
 # Trần ngân sách (đọc từ môi trường; code KHÔNG bao giờ tự tăng)
 # --------------------------------------------------------------------------
-DEFAULT_DAILY_USD = 3.00          # ngân sách chủ sở hữu phê duyệt
+DEFAULT_DAILY_USD = 3.00          # trần hệ thống đang áp dụng; đổi lên 4.00 (chat $3 + worker $1)
+#                                   cần cập nhật các test hardcode $3 trước — xem báo cáo
 DEFAULT_TASK_USD = 0.60           # trần cho một task đơn lẻ
 DEFAULT_MAX_ATTEMPTS = 3          # chống vòng lặp đốt token
 OPENROUTER_URL = "https://openrouter.ai/api/v1/key"
@@ -375,10 +376,6 @@ def _parse_provider_payload(payload: Any, source: str = "provider-confirmed") ->
     data = (payload or {}).get("data") or {}
     limit = data.get("limit")
     usage = data.get("usage") or 0
-    try:
-        remaining = None if limit is None else round(float(limit) - float(usage), 6)
-    except (TypeError, ValueError):
-        remaining = None
 
     def _num(value: Any) -> Optional[float]:
         if value is None:
@@ -388,6 +385,15 @@ def _parse_provider_payload(payload: Any, source: str = "provider-confirmed") ->
         except (TypeError, ValueError):
             return None
 
+    # `usage` là TỔNG luỹ kế, còn `limit` có thể **reset theo ngày** ⇒ `limit - usage` cho
+    # số vô nghĩa (thậm chí âm) khi hạn mức theo kỳ, và gate sẽ từ chối mọi việc vì tưởng
+    # hết hạn mức. Vì vậy ưu tiên `limit_remaining` do provider trả về.
+    reported_remaining = _num(data.get("limit_remaining"))
+    try:
+        computed_remaining = _num(float(limit) - float(usage)) if limit is not None else None
+    except (TypeError, ValueError):
+        computed_remaining = None
+    remaining = reported_remaining if reported_remaining is not None else computed_remaining
     return {
         "ok": True,
         "label": None,                    # cố ý bỏ: nhãn khoá là thông tin nhạy cảm

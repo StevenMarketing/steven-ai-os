@@ -406,5 +406,40 @@ class WorkerProfileTests(unittest.TestCase):
         self.assertTrue(guard.is_paused())
 
 
+class LimitResetTests(unittest.TestCase):
+    """Hạn mức reset theo kỳ: `remaining` phải lấy từ `limit_remaining`, không phải limit−usage."""
+
+    def test_remaining_uses_the_providers_limit_remaining_with_a_daily_limit(self):
+        # Đúng hình dạng thật của OpenRouter: usage là luỹ kế, limit reset theo ngày.
+        payload = {"data": {"limit": 3.0, "usage": 5.48, "usage_daily": 2.79,
+                            "limit_remaining": 0.206583,
+                            "budgets": [{"scope": "key_limit", "limit_usd": 3,
+                                         "spend_usd": 2.79, "remaining_usd": 0.206583,
+                                         "reset_interval": "daily"}]}}
+        parsed = budget._parse_provider_payload(payload)
+        self.assertAlmostEqual(parsed["remaining_usd"], 0.206583, places=6)
+        self.assertNotEqual(parsed["remaining_usd"], round(3.0 - 5.48, 6))
+
+    def test_a_daily_limit_key_is_not_wrongly_refused(self):
+        import tempfile
+        guard = budget.BudgetGuard(tempfile.mkdtemp(prefix="lim-"))
+        info = budget._parse_provider_payload(
+            {"data": {"limit": 3.0, "usage": 5.48, "limit_remaining": 0.206583}})
+        allowed, reason = guard.can_spend(0.05, "t", info)
+        self.assertTrue(allowed, reason)
+        self.assertNotIn("hết hạn mức", reason)
+
+    def test_the_fallback_still_works_when_limit_remaining_is_absent(self):
+        parsed = budget._parse_provider_payload({"data": {"limit": 10, "usage": 4}})
+        self.assertAlmostEqual(parsed["remaining_usd"], 6.0, places=6)
+
+    def test_the_system_cap_default_comes_from_one_constant(self):
+        """Trần hệ thống phải đọc từ DEFAULT_DAILY_USD (chưa đổi sang $4 ở lượt này)."""
+        import tempfile
+        self.assertEqual(budget.DEFAULT_DAILY_USD, 3.00)
+        self.assertEqual(budget.BudgetGuard(tempfile.mkdtemp(prefix="cap-")).daily_usd,
+                         budget.DEFAULT_DAILY_USD)
+
+
 if __name__ == "__main__":
     unittest.main()
