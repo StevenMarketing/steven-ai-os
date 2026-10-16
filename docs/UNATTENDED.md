@@ -84,3 +84,45 @@ quyền**:
 4. Mọi thứ khác vẫn đi qua Hermes với `approvals.mode: smart`.
 
 Cách này giữ nguyên "không vô hiệu hoá kiểm soát bảo mật" mà vẫn chạy 24/7.
+
+## 7. Review phạm vi `command_allowlist`
+
+| Mục | Cho phép gì | Worker có cần? | Rủi ro | Đề xuất |
+|---|---|---|---|---|
+| `command parser limit or malformed executable payload` | lệnh dài/bị parser cắt | không trực tiếp | thấp (hệ quả cú pháp, không phải quyền) | giữ |
+| `execute_code` | công cụ `execute_code` của Hermes — **chạy Python tuỳ ý** | **không** (runbook chỉ dùng terminal + ghi file) | **cao** | có thể bỏ để siết; đổi lại mọi phiên sẽ bị hỏi lại khi dùng công cụ này |
+| `script execution via -e/-c flag` | `python3 -c`, `sh -c`… (**code tuỳ ý inline**) | **trước đây có** — bước 3 tính tên branch | **cao** | **đã loại nhu cầu**: bước 3 nay dùng `python3 scripts/branch_for.py N "<title>"` (script đã kiểm vào repo, có test) ⇒ có thể bỏ mục này |
+
+**Lượt này KHÔNG đổi gì** (đúng yêu cầu "không nới quyền hoặc tắt smart approval"):
+không hạ `approvals.mode`, không thêm, không xoá mục nào.
+
+**Đề xuất (chờ chủ sở hữu duyệt — đây là thay đổi cấu hình bảo mật):**
+
+```bash
+cp -a /opt/data/config.yaml /opt/data/config.yaml.bak-$(date -u +%Y%m%dT%H%M%SZ)
+hermes config set command_allowlist '["command parser limit or malformed executable payload"]'
+hermes config get command_allowlist      # xác minh
+```
+
+Hệ quả khi siết: mọi lần dùng `execute_code` hoặc `python3 -c` trong **bất kỳ** phiên
+nào sẽ hỏi lại. Worker **không** bị ảnh hưởng vì runbook không còn cần `-c`.
+
+## 8. Cổng hợp nhất `scripts/worker_gate.py`
+
+`StateStore.can_start()` chỉ đếm sổ cái **riêng của worker**; nó không thấy chi tiêu của
+các phiên Hermes khác trên cùng khoá, và trong code **không có trần retry**
+(`MAX_ATTEMPTS` không tồn tại ở đâu trước lượt này). `budget.py` có cả hai nhưng
+**không được worker gọi**. `worker_gate.py` nối hai lớp, worker chỉ cần gọi một lệnh
+mỗi bước:
+
+| Lệnh | Việc |
+|---|---|
+| `worker_gate.py can-start --issue N --estimate 0.05` | lớp ngân sách (`max(provider usage_daily, sổ cái)`, hạn mức khoá, **fail-closed**, trần retry) **và** lớp issue (idempotency, claim sống, kill switch). Chỉ cho qua khi **cả hai** đồng ý; từ chối thì in rõ lớp nào chặn |
+| `worker_gate.py claim --issue N --estimate 0.05` | **giữ chỗ ngân sách trước** (nguyên tử), rồi claim issue; claim hỏng ⇒ **nhả chỗ ngay** |
+| `worker_gate.py finish --issue N --outcome done\|failed\|blocked\|needs-info --cost C [--pr URL] [--tests "..."]` | nhả chỗ, ghi **chi phí thật** (tính vào trần retry), đóng issue trong sổ cái, gửi Telegram theo kết cục |
+| `worker_gate.py attempts --issue N` | số lần đã thử / trần retry |
+| `worker_gate.py report` | số của cả hai lớp |
+
+`worker_gate.py` là **file mới** (không nằm trong protected path), nên nó được review
+như code thường; `scripts/issue_*.py` vẫn protected nên worker không thể tự sửa cổng.
+
