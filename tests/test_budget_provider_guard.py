@@ -14,6 +14,7 @@ Các ca bắt buộc theo yêu cầu chủ sở hữu:
 
 from __future__ import annotations
 
+import json
 import multiprocessing
 import os
 import sys
@@ -242,6 +243,167 @@ class WatchdogTests(unittest.TestCase):
         finally:
             budget.provider_usage = original
         self.assertEqual(code, 0)
+
+
+class MultiKeyTests(unittest.TestCase):
+    """Khoá riêng cho worker: cộng số để giữ trần hệ thống, không lộ giá trị khoá."""
+
+    def setUp(self):
+        self.previous_env = budget.read_env_value
+        self.previous_http = budget.http_get_json
+        budget.read_env_value = lambda name, *a, **k: {
+            "WORKER_OPENROUTER_API_KEY": "worker-secret-value",
+            "OPENROUTER_API_KEY": "chat-secret-value"}.get(name)
+
+        def transport(url, token):
+            if token == "worker-secret-value":
+                return {"data": {"limit": 3, "usage": 0.4, "usage_daily": 0.25,
+                                 "usage_weekly": 0.4, "limit_remaining": 2.6,
+                                 "budgets": [{"scope": "key_limit", "limit_usd": 3,
+                                              "spend_usd": 0.4, "remaining_usd": 2.6,
+                                              "reset_interval": "daily"}]}}
+            return {"data": {"limit": 10, "usage": 5.0, "usage_daily": 2.0,
+                             "usage_weekly": 5.0, "budgets": []}}
+
+        budget.http_get_json = transport
+
+        def restore():
+            budget.read_env_value = self.previous_env
+            budget.http_get_json = self.previous_http
+        self.addCleanup(restore)
+
+    def test_both_keys_are_read_and_their_daily_usage_is_summed(self):
+        info = budget.provider_usage()
+        self.assertTrue(info["ok"])
+        self.assertEqual(info["keys_read"], ["worker", "chat"])
+        self.assertAlmostEqual(info["usage_daily_usd"], 2.25, places=6)
+        # worker 3 − 0.4 = 2.6 · chat 10 − 5.0 = 5.0 ⇒ tổng 7.6
+        self.assertAlmostEqual(info["remaining_usd"], 7.6, places=6)
+
+    def test_no_key_value_appears_anywhere_in_the_result(self):
+        blob = json.dumps(budget.provider_usage())
+        for leaked in ("worker-secret-value", "chat-secret-value"):
+            self.assertNotIn(leaked, blob)
+
+    def test_the_worker_keys_own_hard_limit_is_visible_separately(self):
+        info = budget.provider_usage()
+        self.assertEqual([b["role"] for b in info["budgets"]], ["worker"])
+        self.assertEqual(info["budgets"][0]["reset_interval"], "daily")
+        self.assertEqual(info["budgets"][0]["limit_usd"], 3)
+        roles = {p["role"]: p for p in info["per_key"]}
+        self.assertEqual(roles["worker"]["limit_usd"], 3)
+        self.assertEqual(roles["worker"]["usage_daily_usd"], 0.25)
+        self.assertEqual(roles["chat"]["limit_usd"], 10)
+
+    def test_a_missing_worker_key_falls_back_to_the_single_chat_key(self):
+        budget.read_env_value = lambda name, path=None, *a, **k: (
+            "chat-secret-value" if name == "OPENROUTER_API_KEY" and path is None else None)
+        info = budget.provider_usage()
+        self.assertEqual(info["keys_read"], ["chat"])
+        self.assertAlmostEqual(info["usage_daily_usd"], 2.0, places=6)
+
+    def test_the_worker_key_usage_helper_is_explicit_when_not_configured(self):
+        budget.read_env_value = lambda name, *a, **k: None
+        usage = budget.worker_key_usage()
+        self.assertFalse(usage["ok"])
+        self.assertFalse(usage["configured"])
+        self.assertIn("chưa cấu hình", usage["error"])
+
+    def test_no_key_configured_at_all_is_reported_not_guessed(self):
+        budget.read_env_value = lambda name, *a, **k: None
+        info = budget.provider_usage()
+        self.assertFalse(info["ok"])
+        self.assertIn("WORKER_OPENROUTER_API_KEY", info["error"])
+        self.assertIn("OPENROUTER_API_KEY", info["error"])
+
+
+    def test_the_worker_key_can_be_read_from_the_worker_profiles_env_file(self):
+        """Khoá worker nằm trong .env của profile worker ⇒ vẫn cộng được vào trần hệ thống."""
+        os.environ["STEVEN_WORKER_ENV_FILE"] = "/opt/data/profiles/worker-agent/.env"
+        self.addCleanup(os.environ.pop, "STEVEN_WORKER_ENV_FILE", None)
+        budget.read_env_value = lambda name, path=None, *a, **k: (
+            {"OPENROUTER_API_KEY": "chat-secret-value"}.get(name) if path is None
+            else ("worker-secret-value" if name == "OPENROUTER_API_KEY" else None))
+        info = budget.provider_usage()
+        self.assertEqual(info["keys_read"], ["worker", "chat"])
+        self.assertAlmostEqual(info["usage_daily_usd"], 2.25, places=6)
+        blob = json.dumps(info)
+        self.assertNotIn("worker-secret-value", blob)
+        self.assertNotIn("chat-secret-value", blob)
+
+    def test_a_worker_profile_without_a_key_falls_back_to_the_chat_key_only(self):
+        os.environ["STEVEN_WORKER_ENV_FILE"] = "/opt/data/profiles/worker-agent/.env"
+        self.addCleanup(os.environ.pop, "STEVEN_WORKER_ENV_FILE", None)
+        budget.read_env_value = lambda name, path=None, *a, **k: (
+            "chat-secret-value" if name == "OPENROUTER_API_KEY" and path is None else None)
+        info = budget.provider_usage()
+        self.assertEqual(info["keys_read"], ["chat"])
+        self.assertAlmostEqual(info["usage_daily_usd"], 2.0, places=6)
+
+    def test_worker_key_usage_names_the_worker_profile_env_file(self):
+        budget.read_env_value = lambda name, path=None, *a, **k: None
+        usage = budget.worker_key_usage()
+        self.assertFalse(usage["configured"])
+        self.assertIn("worker-agent", usage["worker_env_file"])
+        self.assertIn("OPENROUTER_API_KEY", usage["error"])
+
+    def test_the_whole_report_carries_no_key_values(self):
+        blob = json.dumps({"usage": budget.provider_usage(),
+                           "worker": budget.worker_key_usage()})
+        for leaked in ("worker-secret-value", "chat-secret-value", "sk-or-v1"):
+            self.assertNotIn(leaked, blob)
+
+
+class WorkerProfileTests(unittest.TestCase):
+    """Profile `worker-agent`: khoá riêng + watchdog phải pause job ở ĐÚNG profile."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="wg-prof-")
+        self.budget_dir = os.path.join(self.tmp, "budget")
+        self.previous_env = budget.read_env_value
+
+    def tearDown(self):
+        budget.read_env_value = self.previous_env
+
+    def test_the_worker_profile_env_file_is_used_without_any_env_var(self):
+        os.environ.pop("STEVEN_WORKER_ENV_FILE", None)
+        seen = []
+
+        def reader(name, path=None, *a, **k):
+            if name != "OPENROUTER_API_KEY":
+                return None
+            seen.append(path)
+            return "worker-secret-value" if path else "chat-secret-value"
+
+        budget.read_env_value = reader
+        info = budget.provider_usage()
+        self.assertEqual(info["keys_read"], ["worker", "chat"])
+        self.assertIn("/opt/data/profiles/worker-agent/.env", seen)
+        blob = json.dumps(info)
+        self.assertNotIn("worker-secret-value", blob)
+        self.assertNotIn("chat-secret-value", blob)
+
+    def test_enforce_pauses_the_job_in_the_worker_profile(self):
+        calls = []
+
+        def fake_hermes(*args):
+            calls.append(tuple(args))
+            if args[:2] == ("-p", "worker-agent") and args[2:] == ("cron", "list"):
+                return {"returncode": 0, "stdout": "JOB123 present in worker-agent"}
+            if args == ("cron", "list"):
+                return {"returncode": 0, "stdout": "(no jobs in default profile)"}
+            return {"returncode": 0, "stdout": "ok"}
+
+        original = budget_watchdog._hermes
+        budget_watchdog._hermes = fake_hermes
+        self.addCleanup(setattr, budget_watchdog, "_hermes", original)
+        guard = budget.BudgetGuard(self.budget_dir)
+        guard.record("issue-1", 3.2)
+        action = budget_watchdog.enforce(guard, "JOB123")
+        self.assertIn(("-p", "worker-agent", "cron", "pause", "JOB123"), calls)
+        self.assertIsNone(action["cron_default"])              # không có job ở profile mặc định
+        self.assertIsNotNone(action["cron_worker_profile"])    # đã pause ở worker-agent
+        self.assertTrue(guard.is_paused())
 
 
 if __name__ == "__main__":
