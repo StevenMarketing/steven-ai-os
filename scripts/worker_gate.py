@@ -84,6 +84,9 @@ class Gate:
     # -- lệnh ---------------------------------------------------------------
     def can_start(self, issue: Any, estimate: float = DEFAULT_ESTIMATE,
                   provider: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        # Đọc lại trạng thái trên đĩa: một tiến trình sống lâu (hoặc test dùng lại cùng
+        # một Gate) không được kết luận dựa trên ảnh chụp cũ của sổ cái.
+        self.state = lib.StateStore(self.state_path)
         ok_budget, budget_reason, spend = self.budget_check(issue, estimate, provider)
         ok_issue, issue_reason = self.state.can_start(issue, estimate)
         allowed = bool(ok_budget and ok_issue)

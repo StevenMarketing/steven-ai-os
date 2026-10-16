@@ -23,6 +23,7 @@ sys.path.insert(0, os.path.join(ROOT, "scripts"))
 
 import budget                 # noqa: E402
 import budget_watchdog        # noqa: E402
+import issue_worker_lib as lib  # noqa: E402
 import notify                 # noqa: E402
 import worker_gate            # noqa: E402
 
@@ -119,7 +120,7 @@ class FullPathTests(IntegrationBase):
         self.assertFalse(verdict["allowed"])
         self.assertIn("fail-closed", verdict["reason"])
 
-    def test_a_second_worker_cannot_claim_and_does_not_leak_budget(self):
+    def test_a_second_worker_is_stopped_before_it_takes_any_budget(self):
         gate = self.gate()
         first = gate.claim("45", 0.05, provider=provider(daily=0.0))
         self.assertTrue(first["claimed"], first)
@@ -127,11 +128,34 @@ class FullPathTests(IntegrationBase):
             provider(daily=0.0))["spend"]
         second = gate.claim("45", 0.05, provider=provider(daily=0.0))
         self.assertFalse(second["claimed"])
-        self.assertIn("already claimed", second["reason"])
-        self.assertEqual(second["hold_released_usd"], 0.05)      # chỗ thứ hai được nhả
+        self.assertIn("claimed by run", second["reason"])
+        # bị chặn ở cửa can-start ⇒ KHÔNG giữ thêm chỗ nào (không có gì để nhả)
+        self.assertNotIn("hold_released_usd", second)
         spend_after_second = budget.BudgetGuard(self.budget_dir).spend_today(
             provider(daily=0.0))["spend"]
         self.assertAlmostEqual(spend_after_first, spend_after_second, places=6)
+
+    def test_a_failed_claim_gives_the_budget_hold_back(self):
+        """Nhánh rollback: đã giữ chỗ rồi claim hỏng ⇒ phải nhả chỗ ngay."""
+        gate = self.gate()
+        before = budget.BudgetGuard(self.budget_dir).spend_today(
+            provider(daily=0.0))["spend"]
+        real_claim = lib.StateStore.claim
+
+        def refuse(self, *args, **kwargs):
+            raise lib.ClaimError("issue 45 is claimed by run somebody-else")
+
+        lib.StateStore.claim = refuse
+        try:
+            result = gate.claim("45", 0.05, provider=provider(daily=0.0))
+        finally:
+            lib.StateStore.claim = real_claim
+        self.assertFalse(result["claimed"])
+        self.assertIn("ClaimError", result["reason"])
+        self.assertEqual(result["hold_released_usd"], 0.05)
+        after = budget.BudgetGuard(self.budget_dir).spend_today(
+            provider(daily=0.0))["spend"]
+        self.assertAlmostEqual(before, after, places=6)      # không rò ngân sách
 
     def test_the_retry_cap_stops_a_looping_worker(self):
         gate = self.gate()
