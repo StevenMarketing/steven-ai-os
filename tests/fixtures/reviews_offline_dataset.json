@@ -1,0 +1,88 @@
+{
+  "dataset_version": 1,
+  "note": "Synthetic multi-location review dataset for the offline FixtureSync tests. No real business, reviewer or customer data.",
+  "locations": [
+    {
+      "location": "accounts/9001/locations/loc-101",
+      "reviews": [
+        {
+          "reviewId": "rev-1",
+          "rating": 5,
+          "comment": "Great service!",
+          "reviewer": {"displayName": "Ann"},
+          "createTime": "2026-01-01T00:00:00Z",
+          "updateTime": "2026-01-02T00:00:00Z",
+          "status": "published"
+        },
+        {
+          "reviewId": "rev-2",
+          "rating": 4,
+          "comment": "Nice nails.",
+          "reviewer": {"displayName": "Bo"},
+          "createTime": "2026-01-03T00:00:00Z",
+          "updateTime": "2026-01-03T00:00:00Z",
+          "status": "published"
+        },
+        {
+          "reviewId": "rev-1",
+          "rating": 5,
+          "comment": "Great service, thanks!",
+          "reviewer": {"displayName": "Ann"},
+          "createTime": "2026-01-01T00:00:00Z",
+          "updateTime": "2026-01-04T00:00:00Z",
+          "status": "published"
+        },
+        {
+          "reviewId": "rev-3",
+          "rating": 3,
+          "comment": "It was okay.",
+          "reviewer": {"displayName": null},
+          "createTime": "2026-01-05T00:00:00Z",
+          "updateTime": "2026-01-05T00:00:00Z",
+          "status": "pending"
+        }
+      ]
+    },
+    {
+      "location": "accounts/9001/locations/loc-202",
+      "reviews": [
+        {
+          "reviewId": "rev-1",
+          "rating": 2,
+          "comment": "Different shop, same review id.",
+          "reviewer": {"displayName": "Cy"},
+          "createTime": "2026-02-01T00:00:00Z",
+          "updateTime": "2026-02-01T00:00:00Z",
+          "status": "published"
+        },
+        {
+          "reviewId": "rev-9",
+          "comment": "rating field missing",
+          "reviewer": {"displayName": "Dee"},
+          "createTime": "2026-02-02T00:00:00Z",
+          "updateTime": "2026-02-02T00:00:00Z"
+        },
+        {
+          "reviewId": "rev-10",
+          "rating": 7,
+          "comment": "rating out of range",
+          "reviewer": {"displayName": "Eve"},
+          "createTime": "2026-02-03T00:00:00Z",
+          "updateTime": "2026-02-03T00:00:00Z"
+        },
+        {
+          "rating": 5,
+          "comment": "reviewId missing",
+          "reviewer": {"displayName": "Fay"},
+          "createTime": "2026-02-04T00:00:00Z",
+          "updateTime": "2026-02-04T00:00:00Z"
+        },
+        "not-an-object"
+      ]
+    },
+    {
+      "location": "accounts/9001/locations/loc-303",
+      "reviews": []
+    }
+  ]
+}
