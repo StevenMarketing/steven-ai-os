@@ -698,6 +698,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         grant = RetryGrant(args.state_dir, approval_path=args.approval_file)
+        # The live scope check needs the GitHub token on EVERY command that reports
+        # scope, not only on grant. Installing it here too is what makes ``preview``
+        # able to say scope_ok: true; before this it always reported "no GitHub token".
+        grant.scope_checker = _token_scoped_checker()
         if args.command == "preview":
             approval = None
             try:
@@ -707,7 +711,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             out = grant.plan(args.issue, args.reason, approval, args.operator)
         elif args.command == "grant":
             approval = load_approval(args.approval_file or grant.approval_path)
-            grant.scope_checker = _token_scoped_checker()
             out = grant.grant(args.issue, args.reason, approval, args.operator)
         elif args.command == "history":
             out = {"issue": grant.supported_issue,

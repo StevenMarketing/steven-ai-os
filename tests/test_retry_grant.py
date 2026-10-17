@@ -399,5 +399,50 @@ class ConcurrencyTests(BaseCase):
                                  if e["event"] == "granted"]))
 
 
+class PreviewScopeTokenTests(unittest.TestCase):
+    """Regression: `preview` must install the token-scoped checker. Before the fix a dry
+    run always reported "no GitHub token -- cannot confirm the live scope", so it could
+    never PASS even with a token available."""
+
+    def test_preview_installs_the_token_scoped_checker(self):
+        import os
+        import retry_grant as rg
+
+        captured = {}
+
+        def fake_default(issue, expected_body_sha256=None, token=None):
+            captured["token"] = token
+            return True, "ok"
+
+        class StubGrant:
+            """Stands in for RetryGrant so the test does not need a real worker ledger."""
+            approval_path = "/nonexistent/approval.json"      # load_approval -> GrantError
+            supported_issue = 19
+
+            def __init__(self, *args, **kwargs):
+                self.scope_checker = None
+
+            def plan(self, *args, **kwargs):
+                captured["checker"] = self.scope_checker         # what main() installed
+                return {"dry_run": True, "scope_ok": True}
+
+        orig_default, orig_cls = rg.default_scope_checker, rg.RetryGrant
+        rg.default_scope_checker, rg.RetryGrant = fake_default, StubGrant
+        try:
+            os.environ["GITHUB_TOKEN"] = "probe-token-value"
+            self.addCleanup(os.environ.pop, "GITHUB_TOKEN", None)
+            rc = rg.main(["preview", "--issue", "19", "--reason", "probe", "--operator", "StevenMarketing"])
+            self.assertEqual(rc, 0)
+            checker = captured.get("checker")
+            self.assertIsNotNone(checker, "preview did not install a scope checker")
+            ok, _ = checker(19, None)
+            self.assertTrue(ok)
+            self.assertEqual(captured.get("token"), "probe-token-value")
+        finally:
+            rg.default_scope_checker, rg.RetryGrant = orig_default, orig_cls
+
+
+
+
 if __name__ == "__main__":
     unittest.main()
