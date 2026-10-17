@@ -22,6 +22,7 @@ Dùng::
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import subprocess
@@ -109,6 +110,18 @@ def _build_message_body(event: str, **fields: Any) -> str:
         return "\n".join(lines)
     if event == "worker_error":
         lines = [f"{head} — lỗi worker/cron cần chú ý."]
+        if detail:
+            lines.append(f"Chi tiết: {detail}")
+        return "\n".join(lines)
+    if event == "progress":
+        stage = fields.get("stage") or "update"
+        lines = [f"{head} — tiến độ: {stage}."]
+        if issue:
+            lines.append(f"Issue: #{issue}")
+        if pr:
+            lines.append(f"PR: {pr}")
+        if tests:
+            lines.append(f"Tests: {tests}")
         if detail:
             lines.append(f"Chi tiết: {detail}")
         return "\n".join(lines)
@@ -268,15 +281,134 @@ def crossed_thresholds(guard: budget.BudgetGuard,
             "provider_ok": spend_info["provider_ok"]}
 
 
+# --- Sự kiện tiến độ + chống trùng theo khoá ổn định -------------------------
+
+#: Các chặng tiến độ được phép dùng cho sự kiện ``progress``.
+PROGRESS_STAGES = ("start", "blocked", "draft-pr", "tests", "done", "failed", "budget")
+
+
+def event_identity(event: str, *, issue: Any = None, stage: Optional[str] = None,
+                   pr: Any = None, extra: Any = None) -> str:
+    """Khoá sự kiện **ổn định** — KHÔNG gồm mốc giờ, nên chạy lại vẫn ra cùng khoá.
+
+    Đây là cơ sở chống trùng: hai lần chạy có cùng sự kiện/issue/chặng/PR phải cho
+    cùng một khoá, bất kể thời điểm. Băm 16 ký tự đầu là đủ cho sổ và không suy ra
+    nội dung tin.
+    """
+    basis = {
+        "event": str(event or ""),
+        "issue": None if issue is None else str(issue),
+        "stage": None if stage is None else str(stage),
+        "pr": None if pr is None else str(pr),
+        "extra": None if extra is None else str(extra),
+    }
+    blob = json.dumps(basis, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
+
+
+def dedup_path(state_dir: Optional[str] = None) -> str:
+    """Sổ chống trùng. ``STEVEN_NOTIFY_DEDUP_FILE`` cho phép test cô lập hoàn toàn."""
+    override = os.environ.get("STEVEN_NOTIFY_DEDUP_FILE")
+    if override:
+        return override
+    return os.path.join(state_dir or budget.default_state_dir(), "notify-dedup.json")
+
+
+def load_dedup(state_dir: Optional[str] = None) -> Dict[str, Any]:
+    """Đọc sổ chống trùng; thiếu file/hỏng file ⇒ sổ rỗng (không bao giờ raise)."""
+    try:
+        with open(dedup_path(state_dir), "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError):
+        data = {}
+    events = data.get("events") if isinstance(data, dict) else None
+    return {"events": events if isinstance(events, dict) else {}}
+
+
+def _safe_float(value: Any) -> Optional[float]:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def already_emitted(identity: str, state_dir: Optional[str] = None,
+                    now: Optional[float] = None, window_days: float = 1.0) -> bool:
+    """Khoá này đã gửi trong ``window_days`` ngày gần đây chưa."""
+    stamps = load_dedup(state_dir)["events"].get(identity)
+    if not isinstance(stamps, list):
+        return False
+    cutoff = (now if now is not None else time.time()) - float(window_days) * 86400
+    return any((v := _safe_float(s)) is not None and v >= cutoff for s in stamps)
+
+
+def mark_emitted(identity: str, state_dir: Optional[str] = None,
+                 now: Optional[float] = None, *, event: Optional[str] = None,
+                 issue: Any = None, stage: Optional[str] = None) -> None:
+    """Ghi một lần gửi thành công; chỉ giữ 10 mốc gần nhất mỗi khoá, không lưu nội dung."""
+    record = load_dedup(state_dir)
+    stamp = float(now if now is not None else time.time())
+    keep = [v for s in (record["events"].get(identity) or [])
+            if (v := _safe_float(s)) is not None and v >= stamp - 7 * 86400]
+    keep.append(stamp)
+    record["events"][identity] = keep[-10:]
+    path = dedup_path(state_dir)
+    try:
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(record, handle, indent=2, sort_keys=True)
+    except OSError:
+        pass  # không ghi được sổ thì thà gửi lại còn hơn làm sập worker
+
+
+def emit(event: str, *, issue: Any = None, stage: Optional[str] = None, pr: Any = None,
+         tests: Optional[str] = None, detail: Optional[str] = None,
+         spend: Optional[float] = None, cap: Optional[float] = None,
+         text: Optional[str] = None, target: str = "telegram", dry_run: bool = False,
+         runner: Optional[Runner] = None, state_dir: Optional[str] = None,
+         now: Optional[float] = None, force: bool = False) -> Dict[str, Any]:
+    """Gửi một sự kiện có chống trùng; **không bao giờ raise** và **không gọi LLM**.
+
+    Kết quả: ``sent`` (đã gửi thật), ``skipped`` (trùng, im lặng) hoặc ``error``
+    (lỗi gửi — caller vẫn tiếp tục bình thường). ``dry_run`` không ghi sổ.
+    """
+    try:
+        identity = event_identity(event, issue=issue, stage=stage, pr=pr)
+        if not force and already_emitted(identity, state_dir, now):
+            return {"ok": True, "sent": False, "skipped": True,
+                    "reason": "duplicate", "identity": identity}
+        body = text or build_message(event, issue=issue, pr=pr, tests=tests,
+                                     detail=detail, stage=stage, spend=spend,
+                                     cap=cap, now=now)
+        outcome = send(body, target=target, dry_run=dry_run, runner=runner,
+                       state_dir=state_dir, label=identity, event=event)
+        ok = bool(outcome.get("ok"))
+        if ok and not dry_run:
+            mark_emitted(identity, state_dir, now, event=event, issue=issue, stage=stage)
+        return {"ok": ok, "sent": bool(ok and not dry_run), "skipped": False,
+                "identity": identity, "message": outcome.get("message")}
+    except Exception as exc:  # noqa: BLE001 - lỗi gửi KHÔNG được làm sập worker
+        return {"ok": False, "sent": False, "skipped": False,
+                "error": type(exc).__name__}
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Thông báo Telegram cho Steven AI OS.")
     parser.add_argument("--event", default="custom",
                         choices=["task_done", "task_failed", "task_blocked", "budget",
-                                 "worker_error", "custom"])
+                                 "worker_error", "progress", "custom"])
     parser.add_argument("--issue")
     parser.add_argument("--pr")
     parser.add_argument("--tests")
     parser.add_argument("--detail")
+    parser.add_argument("--stage", choices=list(PROGRESS_STAGES),
+                        help="chặng tiến độ cho --event progress")
+    parser.add_argument("--spend", type=float)
+    parser.add_argument("--cap", type=float)
+    parser.add_argument("--dedupe", action="store_true",
+                        help="gửi qua emit(): chống trùng theo khoá sự kiện ổn định")
+    parser.add_argument("--force", action="store_true",
+                        help="bỏ qua chống trùng (dùng khi thật sự cần gửi lại)")
     parser.add_argument("--text")
     parser.add_argument("--target", default="telegram")
     parser.add_argument("--state-dir", default=budget.default_state_dir())
@@ -316,6 +448,20 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
               f"ngân sách ${result['spend_usd']:.4f}/${result['cap_usd']:.2f} "
               f"· đã gửi: {[s['label'] for s in sent] or 'không'}")
         return 0
+
+    if args.event == "progress" or args.dedupe:
+        outcome = emit(args.event, issue=args.issue, stage=args.stage, pr=args.pr,
+                       tests=args.tests, detail=args.detail, spend=args.spend,
+                       cap=args.cap, text=args.text, target=args.target,
+                       dry_run=args.dry_run, state_dir=args.state_dir, force=args.force)
+        if args.json:
+            print(json.dumps(outcome, indent=2, default=str))
+        elif outcome.get("skipped"):
+            print("SKIP (đã gửi trước đó): " + str(outcome.get("identity", "")))
+        else:
+            print(("DRY-RUN: " if args.dry_run else "sent: ")
+                  + str(outcome.get("message", outcome.get("error", ""))))
+        return 0 if outcome.get("ok") else 1
 
     text = args.text or build_message(args.event, issue=args.issue, pr=args.pr,
                                       tests=args.tests, detail=args.detail)
