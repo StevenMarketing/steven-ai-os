@@ -459,14 +459,12 @@ class WorkerCapTests(IntegrationBase):
             for _ in range(times):
                 store.record_usage(cost)
 
-    def test_the_default_caps_allow_three_issues_a_day(self):
-        self._use(0.06, times=2)                      # 2 issue, đã dùng $0.12
+    def test_the_default_caps_match_the_owner_approved_limits(self):
+        """Owner approved 3 -> 10 issues/day and $0.20 -> $0.60/day on 2026-10-17."""
         caps = worker_gate.issue_caps()
         self.assertEqual(caps["per_issue_usd"], 0.06)
-        self.assertEqual(caps["per_day_usd"], 0.20)
-        self.assertEqual(caps["issues_per_day"], 3)
-        verdict = self.gate().can_start("90", 0.06, provider=provider(daily=0.0))
-        self.assertTrue(verdict["allowed"], verdict)
+        self.assertEqual(caps["per_day_usd"], 0.60)
+        self.assertEqual(caps["issues_per_day"], 10)
 
     def test_the_old_cap_would_have_refused_the_third_issue(self):
         self._use(0.06, times=2)

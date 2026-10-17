@@ -47,7 +47,7 @@ DEFAULT_TTL = lib.CLAIM_TTL_SECONDS
 
 
 def issue_caps() -> Dict[str, Any]:
-    """Hạn mức riêng của worker: $0.06/issue · **$0.20/ngày** · 3 issue/ngày.
+    """Hạn mức riêng của worker: $0.06/issue · **$0.60/ngày** · 10 issue/ngày (owner approved 2026-10-17).
 
     Đây là **tham số truyền vào** `StateStore.can_start` (và `remaining_today`), nên không
     phải sửa `issue_worker_lib.py` — vốn là protected path. Mặc định trong lib vẫn là
@@ -56,8 +56,8 @@ def issue_caps() -> Dict[str, Any]:
     """
     return {
         "per_issue_usd": float(os.environ.get("STEVEN_WORKER_PER_ISSUE_USD") or 0.06),
-        "per_day_usd": float(os.environ.get("STEVEN_WORKER_PER_DAY_USD") or 0.20),
-        "issues_per_day": int(os.environ.get("STEVEN_WORKER_ISSUES_PER_DAY") or 3),
+        "per_day_usd": float(os.environ.get("STEVEN_WORKER_PER_DAY_USD") or 0.60),
+        "issues_per_day": int(os.environ.get("STEVEN_WORKER_ISSUES_PER_DAY") or 10),
     }
 
 OUTCOME_EVENT = {
