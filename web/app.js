@@ -45,7 +45,8 @@
         auditHistory: "Audit History",
         systemStatus: "System Status",
         settings: "Settings",
-        googleConnection: "Google Connection"
+        googleConnection: "Google Connection",
+        businessDashboard: "Business Dashboard"
       },
       state: {
         loading: "Loading…",
@@ -88,6 +89,27 @@
         colRating: "Rating",
         colComment: "Comment",
         view: "Preview reviews"
+      },
+      business: {
+        // The Business Dashboard is an OFFLINE fixture preview: nothing here
+        // implies a live Google account or GBP connection is present.
+        fixtureBadge: "FIXTURE",
+        fixtureLabel: "FIXTURE DATA — synthetic sample businesses, not read from Google.",
+        note: "Offline preview only. No Google account is connected from this page and nothing is published.",
+        reviewsTitle: "Fixture reviews for the selected business",
+        selectBusiness: "Select a business above to see its fixture reviews.",
+        noReviews: "No fixture reviews for this business.",
+        empty: "No fixture businesses available.",
+        noMatch: "No businesses match this search or filter.",
+        colName: "Business Name",
+        colZip: "ZIP Code",
+        colAddress: "Address",
+        colId: "Location ID",
+        colStatus: "Status",
+        colRating: "Rating",
+        colComment: "Comment",
+        colAuthor: "Reviewer",
+        view: "View"
       },
       dashboard: {
         summary: "Total drafts tracked: {n}. DRAFT MODE — nothing is published to Google.",
@@ -272,7 +294,8 @@
     audit:       { section: "audit" },
     status:      { section: "status" },     // System Status shell panel
     settings:    { section: "settings" },   // Settings shell panel
-    google:      { section: "google" }      // Google Connection (offline fixture preview)
+    google:      { section: "google" },     // Google Connection (offline fixture preview)
+    business:    { section: "business" }    // Business Dashboard (offline fixture preview)
   };
 
   // NAV -> AREA MAPPING. The old `?area=` values keep working and the new nav
@@ -298,7 +321,9 @@
     "audit-history": "audit",
     "system-status": "status",
     "google-connection": "google",
-    connection: "google"
+    connection: "google",
+    "business-dashboard": "business",
+    businesses: "business"
   };
 
   //: Primary nav order (the 8 areas), used to keep active-state in sync.
@@ -605,6 +630,7 @@
     $("area-status").hidden = cfg.section !== "status";
     $("area-settings").hidden = cfg.section !== "settings";
     $("area-google").hidden = cfg.section !== "google";
+    $("area-business").hidden = cfg.section !== "business";
 
     if (cfg.section === "dashboard") renderDashboard();
     else if (cfg.section === "locations") renderLocations();
@@ -612,6 +638,7 @@
     else if (cfg.section === "status") renderSystemStatus();
     else if (cfg.section === "settings") renderSettings();
     else if (cfg.section === "google") renderGoogleConnection();
+    else if (cfg.section === "business") renderBusinessDashboard();
     else renderQueue(cfg);
 
     closeDrawer();
@@ -1530,6 +1557,218 @@
     if (empty) empty.textContent = t("panel.settingsEmpty");
   }
 
+  // --- Business Dashboard (offline FIXTURE data only) --------------- //
+  // Every business and review below is synthetic FIXTURE data. This module
+  // never calls Google, never opens a sign-in flow, never posts anything and
+  // never reads from a live account: readiness values are display-only fixture
+  // labels and MUST NOT be read as a live Google GBP connection.
+  // The JSON below is strict JSON (double quotes only) so tests can parse it.
+  // BEGIN_BUSINESS_FIXTURE
+  var BUSINESS_FIXTURE = {
+    "label": "FIXTURE",
+    "businesses": [
+      {
+        "location_id": "locations/fx-101",
+        "name": "Luxe Nails & Spa",
+        "zip": "92843",
+        "address": "14001 Brookhurst St, Garden Grove, CA 92843",
+        "readiness": "ready",
+        "reviews": [
+          { "rating": 5, "comment": "Great gel manicure, very gentle.", "author": "Fixture A" },
+          { "rating": 4, "comment": "Nice staff, a little wait.", "author": "Fixture B" }
+        ]
+      },
+      {
+        "location_id": "locations/fx-102",
+        "name": "Luxe Nails & Spa",
+        "zip": "92683",
+        "address": "9200 Bolsa Ave, Westminster, CA 92683",
+        "readiness": "ready",
+        "reviews": [
+          { "rating": 5, "comment": "Love my nails every time!", "author": "Fixture C" }
+        ]
+      },
+      {
+        "location_id": "locations/fx-103",
+        "name": "Bloom Beauty Bar",
+        "zip": "92626",
+        "address": "3033 Bristol St, Costa Mesa, CA 92626",
+        "readiness": "needs_connection",
+        "reviews": [
+          { "rating": 2, "comment": "Rushed pedicure, uneven polish.", "author": "Fixture D" }
+        ]
+      },
+      {
+        "location_id": "locations/fx-104",
+        "name": "Serene Spa & Nails",
+        "zip": "92804",
+        "address": "1211 S Euclid St, Anaheim, CA 92804",
+        "readiness": "not_connected",
+        "reviews": []
+      },
+      {
+        "location_id": "locations/fx-105",
+        "name": "Golden Petal Nails",
+        "zip": "92708",
+        "address": "18000 Euclid St, Fountain Valley, CA 92708",
+        "readiness": "ready",
+        "reviews": [
+          { "rating": 5, "comment": "Clean shop and friendly team.", "author": "Fixture E" }
+        ]
+      }
+    ]
+  };
+  // END_BUSINESS_FIXTURE
+
+  //: Hard cap on the fixture preview (never shows more than five businesses).
+  var BUSINESS_MAX = 5;
+
+  //: Display labels for the fixture readiness values (display-only, never a
+  //: claim that the account is live-connected).
+  var BUSINESS_READINESS_LABELS = {
+    ready: "Ready",
+    needs_connection: "Needs connection",
+    not_connected: "Not connected"
+  };
+
+  var bizState = { q: "", readiness: "", selected: null };
+
+  function businessReadinessLabel(value) {
+    return BUSINESS_READINESS_LABELS[value] || "Not connected";
+  }
+
+  function businessRows() {
+    return (BUSINESS_FIXTURE.businesses || []).slice(0, BUSINESS_MAX);
+  }
+
+  //: Search matches the business NAME or the ZIP. A name alone is not unique
+  //: (two fixture shops share "Luxe Nails & Spa"), so the ZIP is what tells two
+  //: same-name businesses apart -- "Luxe Nails & Spa" + ZIP 92843 vs 92683.
+  function businessMatches(biz, q) {
+    var needle = String(q == null ? "" : q).trim().toLowerCase();
+    if (!needle) return true;
+    return String(biz.name || "").toLowerCase().indexOf(needle) !== -1 ||
+           String(biz.zip || "").toLowerCase().indexOf(needle) !== -1;
+  }
+
+  function filterBusinesses(q, readiness) {
+    return businessRows().filter(function (biz) {
+      if (readiness && biz.readiness !== readiness) return false;
+      return businessMatches(biz, q);
+    });
+  }
+
+  function selectBusiness(locationId) {
+    bizState.selected = locationId;
+    var chosen = null;
+    businessRows().forEach(function (biz) {
+      if (biz.location_id === locationId) chosen = biz;
+    });
+    renderBusinessReviews(chosen);
+    renderBusinessTable(filterBusinesses(bizState.q, bizState.readiness));
+  }
+
+  function renderBusinessReviews(biz) {
+    var wrap = $("business-reviews");
+    var title = $("business-reviews-title");
+    if (!wrap) return;
+    clearNode(wrap);
+    if (title) {
+      title.textContent = biz
+        ? t("business.reviewsTitle") + " — " + biz.name + " (" + biz.zip + ")"
+        : t("business.reviewsTitle");
+    }
+    if (!biz) { renderEmpty(wrap, t("business.selectBusiness")); return; }
+    var rows = biz.reviews || [];
+    if (!rows.length) { renderEmpty(wrap, t("business.noReviews")); return; }
+    var table = el("table", { cls: "grid" });
+    table.appendChild(el("thead", {}, [el("tr", {}, [
+      el("th", { text: t("business.colRating") }),
+      el("th", { text: t("business.colComment") }),
+      el("th", { text: t("business.colAuthor") })
+    ])]));
+    var body = el("tbody");
+    rows.forEach(function (r) {
+      body.appendChild(el("tr", {}, [
+        el("td", { text: stars(r.rating) }),
+        el("td", { text: r.comment }),
+        el("td", { text: r.author || "\u2014" })
+      ]));
+    });
+    table.appendChild(body);
+    wrap.appendChild(table);
+  }
+
+  function renderBusinessTable(rows) {
+    var wrap = $("business-table");
+    if (!wrap) return;
+    clearNode(wrap);
+    if (!rows.length) {
+      var filtered = !!(bizState.q || bizState.readiness);
+      renderEmpty(wrap, filtered ? t("business.noMatch") : t("business.empty"));
+      return;
+    }
+    var table = el("table", { cls: "grid biz-table" });
+    table.appendChild(el("thead", {}, [el("tr", {}, [
+      el("th", { text: t("business.colName") }),
+      el("th", { text: t("business.colZip") }),
+      el("th", { text: t("business.colAddress") }),
+      el("th", { text: t("business.colId") }),
+      el("th", { text: t("business.colStatus") }),
+      el("th", { text: "" })
+    ])]));
+    var body = el("tbody");
+    rows.forEach(function (biz) {
+      var selected = bizState.selected === biz.location_id;
+      var tr = el("tr", {
+        cls: "biz-row" + (selected ? " selected" : ""),
+        attrs: { "data-biz-id": biz.location_id }
+      });
+      tr.appendChild(el("td", { attrs: { "data-label": t("business.colName") } }, [
+        el("button", { cls: "link-btn", text: biz.name,
+          attrs: { type: "button", "data-biz-select": biz.location_id } })
+      ]));
+      tr.appendChild(el("td", { text: biz.zip,
+        attrs: { "data-label": t("business.colZip") } }));
+      tr.appendChild(el("td", { text: biz.address,
+        attrs: { "data-label": t("business.colAddress") } }));
+      tr.appendChild(el("td", { text: biz.location_id,
+        attrs: { "data-label": t("business.colId") } }));
+      tr.appendChild(el("td", { attrs: { "data-label": t("business.colStatus") } }, [
+        el("span", { cls: "readiness readiness-" + biz.readiness,
+          text: businessReadinessLabel(biz.readiness) })
+      ]));
+      var viewBtn = el("button", { cls: "link-btn", text: t("business.view"),
+        attrs: { type: "button" } });
+      viewBtn.addEventListener("click", function () { selectBusiness(biz.location_id); });
+      tr.appendChild(el("td", {}, [viewBtn]));
+      body.appendChild(tr);
+    });
+    table.appendChild(body);
+    wrap.appendChild(table);
+  }
+
+  function renderBusinessDashboard() {
+    clearNotice();
+    var badge = $("business-fixture-badge");
+    if (badge) badge.textContent = t("business.fixtureBadge");
+    var note = $("business-note");
+    if (note) note.textContent = t("business.note");
+    var label = $("business-label");
+    if (label) label.textContent = t("business.fixtureLabel");
+    var table = $("business-table");
+    if (table && !table.getAttribute("data-biz-painted")) {
+      renderLoading(table);
+      table.setAttribute("data-biz-painted", "1");
+    }
+    renderBusinessTable(filterBusinesses(bizState.q, bizState.readiness));
+    var chosen = null;
+    businessRows().forEach(function (biz) {
+      if (biz.location_id === bizState.selected) chosen = biz;
+    });
+    renderBusinessReviews(chosen);
+  }
+
   // --- Google Connection (offline readiness + FIXTURE preview) ------ //
   // EVERY row below is hard-coded FIXTURE DATA -- this module never calls
   // Google, never opens a connect flow, and there is no publish endpoint. The
@@ -2116,6 +2355,35 @@
     $("bulk-approve-btn").addEventListener("click", bulkApprove);
     if ($("queue-detail-back")) {
       $("queue-detail-back").addEventListener("click", closeDetail);
+    }
+
+    // Business Dashboard controls (offline fixture search / filter / select).
+    if ($("biz-search")) {
+      $("biz-search").addEventListener("click", function () {
+        bizState.q = ($("biz-q").value || "").trim();
+        bizState.readiness = $("biz-readiness").value || "";
+        renderBusinessDashboard();
+      });
+    }
+    if ($("biz-q")) {
+      $("biz-q").addEventListener("input", function () {
+        bizState.q = ($("biz-q").value || "").trim();
+        renderBusinessDashboard();
+      });
+    }
+    if ($("biz-readiness")) {
+      $("biz-readiness").addEventListener("change", function () {
+        bizState.readiness = $("biz-readiness").value || "";
+        renderBusinessDashboard();
+      });
+    }
+    if ($("biz-reset")) {
+      $("biz-reset").addEventListener("click", function () {
+        bizState.q = ""; bizState.readiness = ""; bizState.selected = null;
+        if ($("biz-q")) $("biz-q").value = "";
+        if ($("biz-readiness")) $("biz-readiness").value = "";
+        renderBusinessDashboard();
+      });
     }
 
     // Locations page controls (server-side search / filter / sort / paging).
