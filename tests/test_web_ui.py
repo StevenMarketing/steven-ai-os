@@ -11,6 +11,7 @@ from __future__ import annotations
 import http.client
 import json
 import os
+import re
 import sys
 import tempfile
 import threading
@@ -361,6 +362,89 @@ class WebUiTestCase(unittest.TestCase):
         self.assertIn("AREA_ALIASES", js)
         self.assertIn("overview", js)
         self.assertIn("review-inbox", js)
+
+
+class GoogleConnectionUiTests(unittest.TestCase):
+    """Issue #19: offline Google connection UI + fixture-based read-only preview.
+
+    Static contract only -- the preview is hard-coded FIXTURE DATA, there is no
+    live Google call and no new API endpoint, so nothing here touches the
+    network beyond the loopback static fetch.
+    """
+
+    HTML = _read(WEB_HTML)
+    JS = _read(WEB_JS)
+
+    def test_connection_area_and_nav_are_present(self):
+        self.assertIn('id="area-google"', self.HTML)
+        self.assertIn('data-area="google"', self.HTML)
+        self.assertIn("Google Connection", self.HTML)
+        # routed in app.js (AREAS + showArea dispatch)
+        self.assertIn('google:      { section: "google" }', self.JS)
+        self.assertIn('renderGoogleConnection', self.JS)
+        self.assertIn('"google-connection": "google"', self.JS)
+
+    def test_not_ready_message_is_clear_and_never_fakes_connected(self):
+        self.assertIn('id="google-readiness"', self.HTML)
+        self.assertIn('data-google-state="unknown"', self.HTML)
+        # a distinct not-ready sentence exists and is used on both the error path
+        self.assertIn("notReady:", self.JS)
+        self.assertIn("Google is not connected.", self.JS)
+        self.assertIn('data-google-state", "not_ready"', self.JS)
+        # the connected state is only ever reported from the real API flag
+        self.assertIn("google_connected === true", self.JS)
+
+    def test_preview_is_labeled_as_fixture_data(self):
+        self.assertIn("GOOGLE_PREVIEW_FIXTURE", self.JS)
+        self.assertIn("FIXTURE DATA", self.JS)
+        self.assertIn("not read from Google", self.HTML)
+
+    def test_preview_exposes_up_to_five_locations_with_required_fields(self):
+        ids = re.findall(r'id:\s*"locations/fx-\d{3}"', self.JS)
+        self.assertEqual(len(ids), 5, "expected exactly five fixture locations")
+        for field in ('name:', "address:", "zip:"):
+            self.assertIn(field, self.JS, msg=f"fixture location missing {field}")
+        # the renderer prints name / address / ZIP / ID columns
+        for col in ("google.colName", "google.colAddress", "google.colZip", "google.colId"):
+            self.assertIn(col, self.JS, msg=f"missing preview column {col}")
+        # the cap is explicit and enforced
+        self.assertIn("GOOGLE_PREVIEW_MAX = 5", self.JS)
+        self.assertIn("slice(0, GOOGLE_PREVIEW_MAX)", self.JS)
+
+    def test_selected_location_shows_read_only_fixture_reviews(self):
+        self.assertIn('id="google-preview-reviews"', self.HTML)
+        self.assertIn("renderGoogleFixtureReviews", self.JS)
+        self.assertIn('"locations/fx-001": [', self.JS)
+        self.assertIn("google.noReviews", self.JS)
+        self.assertIn("google.selectLocation", self.JS)
+
+    def test_no_new_api_endpoint_or_publish_path(self):
+        # the connection view must not invent an alternative Google endpoint
+        self.assertNotIn("/api/google", self.JS)
+        self.assertNotIn("/api/google", self.HTML)
+        # and it must not call Google directly
+        self.assertNotIn("googleapis.com", self.JS)
+
+    def test_index_page_serves_the_connection_area(self):
+        repo = Repository(":memory:")
+        repo.init_db(SCHEMA_PATH)
+        acct = repo.upsert_account("accounts/1001")
+        repo.upsert_location(acct, "accounts/1001/locations/loc-001",
+                             title="Demo Nails", city="Garden Grove", state="CA", language="en")
+        service = ApprovalService(repo)
+        server = create_server(service, port=0)
+        host, port = server.server_address[:2]
+        th = threading.Thread(target=server.serve_forever, daemon=True)
+        th.start()
+        try:
+            with urllib.request.urlopen(f"http://127.0.0.1:{port}/", timeout=5) as resp:
+                body = resp.read().decode("utf-8")
+            self.assertIn('id="area-google"', body)
+        finally:
+            server.shutdown()
+            server.server_close()
+            th.join(timeout=5)
+            repo.close()
 
 
 if __name__ == "__main__":

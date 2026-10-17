@@ -44,7 +44,8 @@
         rejected: "Rejected",
         auditHistory: "Audit History",
         systemStatus: "System Status",
-        settings: "Settings"
+        settings: "Settings",
+        googleConnection: "Google Connection"
       },
       state: {
         loading: "Loading…",
@@ -69,6 +70,24 @@
         usage: "AI Usage / Cost",
         systemStatusIntro: "Live sync health and per-location counters, read from /api/locations/status and /api/dashboard.",
         settingsEmpty: "No configurable options yet."
+      },
+      google: {
+        // The readiness line is a plain-text sentence: a clear "not ready"
+        // message is required, never a fake "connected".
+        notReady: "Google is not connected. No live Google call is made from this page — the preview below is FIXTURE DATA only.",
+        ready: "Google is connected. Live reads stay disabled in this build; the preview below is still FIXTURE DATA only.",
+        fixtureLabel: "FIXTURE DATA — sample values, not read from Google.",
+        locationsTitle: "Preview — up to five locations",
+        reviewsTitle: "Read-only reviews for the selected location",
+        selectLocation: "Select a location above to see its fixture reviews.",
+        noReviews: "No fixture reviews for this location.",
+        colName: "Business name",
+        colAddress: "Address",
+        colZip: "ZIP",
+        colId: "ID",
+        colRating: "Rating",
+        colComment: "Comment",
+        view: "Preview reviews"
       },
       dashboard: {
         summary: "Total drafts tracked: {n}. DRAFT MODE — nothing is published to Google.",
@@ -252,7 +271,8 @@
     rejected:    { section: "queue", title: "Rejected",      status: "rejected" },
     audit:       { section: "audit" },
     status:      { section: "status" },     // System Status shell panel
-    settings:    { section: "settings" }    // Settings shell panel
+    settings:    { section: "settings" },   // Settings shell panel
+    google:      { section: "google" }      // Google Connection (offline fixture preview)
   };
 
   // NAV -> AREA MAPPING. The old `?area=` values keep working and the new nav
@@ -276,7 +296,9 @@
     "needs-approval": "needs_review",
     "needs-review": "needs_review",
     "audit-history": "audit",
-    "system-status": "status"
+    "system-status": "status",
+    "google-connection": "google",
+    connection: "google"
   };
 
   //: Primary nav order (the 8 areas), used to keep active-state in sync.
@@ -582,12 +604,14 @@
     $("area-audit").hidden = cfg.section !== "audit";
     $("area-status").hidden = cfg.section !== "status";
     $("area-settings").hidden = cfg.section !== "settings";
+    $("area-google").hidden = cfg.section !== "google";
 
     if (cfg.section === "dashboard") renderDashboard();
     else if (cfg.section === "locations") renderLocations();
     else if (cfg.section === "audit") renderAudit();
     else if (cfg.section === "status") renderSystemStatus();
     else if (cfg.section === "settings") renderSettings();
+    else if (cfg.section === "google") renderGoogleConnection();
     else renderQueue(cfg);
 
     closeDrawer();
@@ -1504,6 +1528,124 @@
     // makes sure the empty-state string is the i18n one.
     var empty = $("settings-empty");
     if (empty) empty.textContent = t("panel.settingsEmpty");
+  }
+
+  // --- Google Connection (offline readiness + FIXTURE preview) ------ //
+  // EVERY row below is hard-coded FIXTURE DATA -- this module never calls
+  // Google, never opens a connect flow, and there is no publish endpoint. The
+  // readiness line only reflects the existing /api/dashboard google_connected
+  // flag, so session / CSRF behaviour is unchanged (a plain read).
+  var GOOGLE_PREVIEW_FIXTURE = {
+    label: "FIXTURE DATA",
+    locations: [
+      { id: "locations/fx-001", name: "Fixture Nails — Garden Grove",
+        address: "14001 Brookhurst St, Garden Grove, CA", zip: "92843" },
+      { id: "locations/fx-002", name: "Fixture Nails — Westminster",
+        address: "9200 Bolsa Ave, Westminster, CA", zip: "92683" },
+      { id: "locations/fx-003", name: "Fixture Nails — Costa Mesa",
+        address: "3033 Bristol St, Costa Mesa, CA", zip: "92626" },
+      { id: "locations/fx-004", name: "Fixture Nails — Anaheim",
+        address: "1211 S Euclid St, Anaheim, CA", zip: "92804" },
+      { id: "locations/fx-005", name: "Fixture Nails — Fountain Valley",
+        address: "18000 Euclid St, Fountain Valley, CA", zip: "92708" }
+    ],
+    reviews: {
+      "locations/fx-001": [
+        { rating: 5, comment: "Great gel manicure, very gentle.", author: "Fixture A" },
+        { rating: 4, comment: "Nice staff, a little wait.", author: "Fixture B" }
+      ],
+      "locations/fx-002": [
+        { rating: 5, comment: "Love my nails every time!", author: "Fixture C" }
+      ],
+      "locations/fx-003": [
+        { rating: 2, comment: "Rushed pedicure, uneven polish.", author: "Fixture D" }
+      ],
+      "locations/fx-004": [],
+      "locations/fx-005": [
+        { rating: 5, comment: "Clean shop and friendly team.", author: "Fixture E" }
+      ]
+    }
+  };
+
+  //: The preview never shows more than five locations (the fixture is the cap).
+  var GOOGLE_PREVIEW_MAX = 5;
+
+  function googleFixtureLocations() {
+    return (GOOGLE_PREVIEW_FIXTURE.locations || []).slice(0, GOOGLE_PREVIEW_MAX);
+  }
+
+  function renderGoogleFixtureReviews(locationId) {
+    var wrap = $("google-preview-reviews");
+    if (!wrap) return;
+    clearNode(wrap);
+    if (!locationId) { renderEmpty(wrap, t("google.selectLocation")); return; }
+    var rows = (GOOGLE_PREVIEW_FIXTURE.reviews || {})[locationId] || [];
+    if (!rows.length) { renderEmpty(wrap, t("google.noReviews")); return; }
+    var table = el("table", { cls: "grid google-reviews" });
+    table.appendChild(el("thead", {}, [el("tr", {}, [
+      el("th", { text: t("google.colRating") }),
+      el("th", { text: t("google.colComment") })
+    ])]));
+    var body = el("tbody");
+    rows.forEach(function (r) {
+      body.appendChild(el("tr", {}, [
+        el("td", { text: stars(r.rating) }),
+        el("td", { text: r.comment })
+      ]));
+    });
+    table.appendChild(body);
+    wrap.appendChild(table);
+  }
+
+  function renderGooglePreviewLocations() {
+    var wrap = $("google-preview-locations");
+    if (!wrap) return;
+    clearNode(wrap);
+    var table = el("table", { cls: "grid google-locations" });
+    table.appendChild(el("thead", {}, [el("tr", {}, [
+      el("th", { text: t("google.colName") }),
+      el("th", { text: t("google.colAddress") }),
+      el("th", { text: t("google.colZip") }),
+      el("th", { text: t("google.colId") }),
+      el("th", { text: "" })
+    ])]));
+    var body = el("tbody");
+    googleFixtureLocations().forEach(function (loc) {
+      var btn = el("button", {
+        cls: "link-btn", text: t("google.view"),
+        attrs: { type: "button", "data-google-loc": loc.id }
+      });
+      btn.addEventListener("click", function () { renderGoogleFixtureReviews(loc.id); });
+      body.appendChild(el("tr", {}, [
+        el("td", { text: loc.name }),
+        el("td", { text: loc.address }),
+        el("td", { text: loc.zip }),
+        el("td", { text: loc.id }),
+        el("td", {}, [btn])
+      ]));
+    });
+    table.appendChild(body);
+    wrap.appendChild(table);
+  }
+
+  function renderGoogleConnection() {
+    clearNotice();
+    var box = $("google-readiness");
+    var label = $("google-preview-label");
+    if (label) label.textContent = t("google.fixtureLabel");
+    renderGooglePreviewLocations();
+    renderGoogleFixtureReviews(null);
+    if (!box) return;
+    // Read-only: the same authenticated GET the shell already uses.
+    api("GET", "/api/dashboard").then(function (data) {
+      var connected = !!(data && data.google_connected === true);
+      box.textContent = connected ? t("google.ready") : t("google.notReady");
+      box.setAttribute("data-google-state", connected ? "connected" : "not_ready");
+    }).catch(function (err) {
+      box.textContent = t("google.notReady");
+      box.setAttribute("data-google-state", "not_ready");
+      reportError(err);
+    });
   }
 
   // ------------------------------------------------------------------ //
