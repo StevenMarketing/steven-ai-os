@@ -88,6 +88,10 @@
       </nav>
 
       <div class="nav-bottom" aria-label="System">
+        <button class="nav-sub" data-area="google" type="button" data-i18n="nav.googleConnection">
+          <span class="dot" id="nav-google-dot" aria-hidden="true"></span>
+          <span class="tab-label">Google Connection</span>
+        </button>
         <button class="nav-sub" data-area="status" type="button" data-i18n="nav.systemStatus">
           <span class="dot" id="nav-status-dot" aria-hidden="true"></span>
           <span class="tab-label">System Status</span>
@@ -332,6 +336,33 @@
             <button type="button" id="audit-prev" aria-label="Previous audit page">Prev</button>
             <span class="muted" id="audit-page-info">Page 1 of 1 — 0 entries</span>
             <button type="button" id="audit-next" aria-label="Next audit page">Next</button>
+          </div>
+        </section>
+
+        <!-- Google Connection -> area=google (offline readiness + FIXTURE preview).
+             No live Google call and no connect/publish endpoint: the readiness
+             line only reflects the existing /api/dashboard google_connected flag. -->
+        <section class="area" id="area-google" hidden>
+          <h2>Google Connection</h2>
+          <p class="muted">Read-only readiness check plus an offline fixture preview.
+            This page never calls Google.</p>
+
+          <div class="panel" id="google-connection-panel">
+            <div class="notice" id="google-readiness" role="status" aria-live="polite"
+                 data-google-state="unknown">
+              Checking Google connection readiness…
+            </div>
+
+            <h3 class="panel-title" id="google-locations-title">Preview — up to five locations</h3>
+            <p class="muted" id="google-preview-label">FIXTURE DATA — sample values, not read from Google.</p>
+            <div class="table-scroll">
+              <div id="google-preview-locations"></div>
+            </div>
+
+            <h3 class="panel-title" id="google-reviews-title">Read-only reviews for the selected location</h3>
+            <div class="table-scroll">
+              <div id="google-preview-reviews"></div>
+            </div>
           </div>
         </section>
 
