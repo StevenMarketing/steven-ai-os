@@ -88,6 +88,10 @@
       </nav>
 
       <div class="nav-bottom" aria-label="System">
+        <button class="nav-sub" data-area="business" type="button" data-i18n="nav.businessDashboard">
+          <span class="dot" id="nav-business-dot" aria-hidden="true"></span>
+          <span class="tab-label">Business Dashboard</span>
+        </button>
         <button class="nav-sub" data-area="google" type="button" data-i18n="nav.googleConnection">
           <span class="dot" id="nav-google-dot" aria-hidden="true"></span>
           <span class="tab-label">Google Connection</span>
@@ -336,6 +340,49 @@
             <button type="button" id="audit-prev" aria-label="Previous audit page">Prev</button>
             <span class="muted" id="audit-page-info">Page 1 of 1 — 0 entries</span>
             <button type="button" id="audit-next" aria-label="Next audit page">Next</button>
+          </div>
+        </section>
+
+        <!-- Business Dashboard -> area=business (offline FIXTURE data only).
+             Every business and review shown here is synthetic FIXTURE data:
+             there is no live Google call, no OAuth/connect endpoint and no
+             publish endpoint. Readiness labels are display-only fixture values
+             and never imply a live Google account / GBP connection. -->
+        <section class="area" id="area-business" hidden>
+          <h2>Business Dashboard
+            <span class="fixture-badge" id="business-fixture-badge">FIXTURE</span>
+          </h2>
+          <p class="muted" id="business-note">Offline preview only. No Google account is connected from this page and nothing is published.</p>
+
+          <form class="filters" id="business-filters" onsubmit="return false;">
+            <label for="biz-q">Search by business name or ZIP
+              <input id="biz-q" name="q" type="search" placeholder="business name or ZIP code"
+                     aria-label="Search fixture businesses by business name or ZIP code">
+            </label>
+            <label for="biz-readiness">Readiness
+              <select id="biz-readiness" name="readiness"
+                      aria-label="Filter fixture businesses by readiness status">
+                <option value="">Any status</option>
+                <option value="ready">Ready</option>
+                <option value="needs_connection">Needs connection</option>
+                <option value="not_connected">Not connected</option>
+              </select>
+            </label>
+            <button type="button" id="biz-search">Search</button>
+            <button type="button" id="biz-reset">Reset</button>
+          </form>
+
+          <p class="muted" id="business-label">FIXTURE DATA — synthetic sample businesses, not read from Google.</p>
+
+          <div class="table-scroll">
+            <div id="business-table"></div>
+          </div>
+
+          <div class="panel" id="business-reviews-panel">
+            <h3 class="panel-title" id="business-reviews-title">Fixture reviews for the selected business</h3>
+            <div class="table-scroll">
+              <div id="business-reviews"></div>
+            </div>
           </div>
         </section>
 

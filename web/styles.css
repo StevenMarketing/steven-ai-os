@@ -909,3 +909,27 @@ button.link:hover, button.link:focus-visible { text-decoration: underline; }
   table.grid.locations-table th,
   table.grid.locations-table td { white-space: normal; }
 }
+
+/* Business Dashboard (offline FIXTURE preview) — issue #30 */
+.fixture-badge {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: #6b5200;
+  color: #fff;
+  font-size: var(--fs-12);
+  letter-spacing: 0.06em;
+  vertical-align: middle;
+}
+.readiness {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  font-size: var(--fs-12);
+}
+.readiness-ready { border-color: #2e7d32; color: #2e7d32; }
+.readiness-needs_connection { border-color: #b26a00; color: #b26a00; }
+.readiness-not_connected { border-color: var(--muted); color: var(--muted); }
+tr.biz-row.selected td { background: var(--panel-2); }
