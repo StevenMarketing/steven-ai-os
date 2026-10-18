@@ -27,6 +27,8 @@ __all__ = [
     "preflight",
     "render_rejection",
     "unclaimed_eligible_alerts",
+    "is_settled",
+    "SETTLED_LABELS",
     "rejection_fingerprint",
     "rejection_key",
     "should_post_rejection",
@@ -39,6 +41,11 @@ __all__ = [
 #: Exact heading text required by the worker policy, in order.
 REQUIRED_HEADINGS = ("Goal", "Scope", "Acceptance Criteria", "Tests Required", "Constraints")
 
+#: Labels that mean the worker has already settled the issue. A reader OUTSIDE the VPS (an
+#: external watchdog, a GitHub Actions runner) has no access to the worker ledger, so these
+#: trusted GitHub signals are what stop it from crying wolf about finished work.
+SETTLED_LABELS = ("hermes-done",)
+
 _HEADING_RE = re.compile(r"^#{1,6}\s*(.+?)\s*$", re.MULTILINE)
 
 
@@ -48,6 +55,18 @@ def _headings(body: str) -> List[str]:
 
 def label_names(issue: Dict[str, Any]) -> List[str]:
     return [str(l.get("name") or "") for l in (issue.get("labels") or [])]
+
+
+def is_settled(issue: Dict[str, Any], processed: Optional[Dict[str, Any]] = None) -> bool:
+    """True when the issue is already finished, judged without needing the VPS ledger."""
+    if str(issue.get("state") or "open") != "open":
+        return True
+    labels = label_names(issue)
+    if any(label in labels for label in SETTLED_LABELS):
+        return True
+    if processed and str(issue.get("number")) in processed:
+        return True
+    return False
 
 
 def preflight(body: Any, *, patterns: Optional[Sequence[Any]] = None) -> Dict[str, Any]:
@@ -236,7 +255,7 @@ def unclaimed_eligible_alerts(
         if "hermes-ready" not in label_names(issue):
             continue
         number = str(issue.get("number"))
-        if number in processed:
+        if is_settled(issue, processed):
             continue
 
         reference: Optional[float] = None

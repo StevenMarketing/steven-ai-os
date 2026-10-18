@@ -30,6 +30,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from gbp.bridge.intake import (  # noqa: E402
     first_seen_update,
+    is_settled,
     preflight,
     ready_since_from_events,
     render_rejection,
@@ -97,21 +98,30 @@ def evaluate_intake(
     report: Dict[str, Any] = {
         "repo": repo, "now": now, "checked": 0, "usable": [], "skipped": [],
         "unclaimed": [], "blocking": 0, "reasons": [], "ready_since": {},
+        "settled": [],
     }
 
     issues_payload, _ = request(
         "GET", "/repos/%s/issues?state=open&labels=hermes-ready&per_page=50" % repo, token)
     issues = [i for i in (issues_payload or []) if "pull_request" not in i]
+    processed = ledger.get("processed") or {}
 
     for issue in issues:
         report["checked"] += 1
         verdict = preflight(issue.get("body"), patterns=patterns)
+        # A reader outside the VPS has no ledger, so "already finished" is decided from
+        # trusted GitHub signals (hermes-done label / closed state). Such an issue is
+        # reported as settled and can never make an external watchdog cry wolf.
+        settled = is_settled(issue, processed)
         entry = {"issue": issue["number"], "title": (issue.get("title") or "")[:90],
                  "missing_headings": verdict["missing_headings"],
-                 "tripwire": verdict["tripwire"], "reasons": verdict["reasons"]}
+                 "tripwire": verdict["tripwire"], "reasons": verdict["reasons"],
+                 "settled": settled}
+        if settled:
+            report["settled"].append(entry)
         if verdict["usable"]:
             report["usable"].append(entry)
-        else:
+        elif not settled:
             report["skipped"].append(entry)
             report["reasons"] += [
                 {"code": reason["code"], "issue": issue["number"],
