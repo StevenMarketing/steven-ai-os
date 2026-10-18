@@ -84,6 +84,13 @@ def _budget_state() -> dict:
         return {"state": "unknown", "detail": type(exc).__name__}
 
 
+def build_document(repo: str = DEFAULT_REPO) -> dict:
+    """The redacted status document, built from live local sources."""
+    return build_redacted_document(
+        generated_at=_utc_now(), worker=_worker_state(), cron=_cron_state(),
+        budget=_budget_state(), repository=repo)
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="Publish the redacted Steven AI OS worker status")
     ap.add_argument("--repo", default=DEFAULT_REPO)
