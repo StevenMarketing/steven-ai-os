@@ -193,6 +193,28 @@ class IntakeAlertTests(unittest.TestCase):
         self.assertIn("--fail-on-alert", workflow)
         self.assertIn("--no-record", workflow)
 
+    def test_settled_issue_never_blocks_an_external_run(self):
+        """#43 today: hermes-ready + hermes-done. Without the VPS ledger the runner must
+        still see it as finished, not as 'unclaimed' or 'unusable'."""
+        import bridge_intake_preflight as cli
+
+        issue = self._issue(43, "## Objective", labels=("hermes-ready", "hermes-done"))
+        events = {"43": self._label(self._ago(7200))}
+
+        def request(method, path, token=None, body=None):
+            return (( [issue], {}) if "labels=hermes-ready" in path else (events.get("43", []), {}))
+
+        report = cli.evaluate_intake(request, "tok", "r/r", now=time.time(), patterns=[],
+                                     observations={}, ledger={})
+        self.assertEqual(report["blocking"], 0)
+        self.assertEqual(len(report["settled"]), 1)
+        self.assertEqual(report["unclaimed"], [])
+
+    def test_settled_issue_is_accepted_by_main_with_fail_on_alert(self):
+        issue = self._issue(43, "## Objective", labels=("hermes-ready", "hermes-done"))
+        events = {"43": self._label(self._ago(7200))}
+        self.assertEqual(self._main([issue], events, extra_argv=("--fail-on-alert",)), 0)
+
 
 if __name__ == "__main__":
     unittest.main()
