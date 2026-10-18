@@ -107,9 +107,12 @@ def main(argv=None) -> int:
         return 1 if args.fail_on_alert else 0
 
     import issue_github
-    import issue_poller
 
-    token = issue_poller.read_token("/opt/data/.env")
+    token = os.environ.get("GITHUB_TOKEN") or ""
+    if not token:                      # local runs read the repo token file
+        import issue_poller
+
+        token = issue_poller.read_token("/opt/data/.env")
     report = collect_and_evaluate(issue_github.request, token, args.repo, args.issue_number,
                                   now=time.time(), max_age_seconds=args.max_age_seconds,
                                   stale_minutes=args.stale_minutes)

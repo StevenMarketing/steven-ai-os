@@ -23,7 +23,28 @@ if [ -z "$PY" ] || [ ! -x "$PY" ]; then
 fi
 
 cd "$HERE" || exit 0
-
+  
+# Issue #45: a hermes-ready issue that cannot be used is reported once, on GitHub,
+# with structured reasons (deduplicated by issue + body). This does not change the
+# poll's stdout: the agent is still only woken when the fingerprint moves.
+STEVEN_INTAKE_REJECT_COMMENTS="${STEVEN_INTAKE_REJECT_COMMENTS:-1}"
+export STEVEN_INTAKE_REJECT_COMMENTS
+  
+# Issue #45 (Priority 2): publish the redacted worker/cron/budget status on a bounded
+# cadence. Output goes to a log file, never to stdout, so monitor deduplication and
+# the worker wake-up rule are untouched.
+# Bounded cadence: at most one publish every 10 minutes (the external watchdog
+# tolerates 15), so a 1-minute poll does not hammer the GitHub API.
+if [ "${STEVEN_STATUS_PUBLISH:-1}" = "1" ]; then
+    STATUS_DIR="$HERMES_HOME_DIR/ops/bridge"
+    mkdir -p "$STATUS_DIR" 2>/dev/null || true
+    if [ ! -f "$STATUS_DIR/last-publish" ] || [ -n "$(find "$STATUS_DIR/last-publish" -mmin +10 2>/dev/null)" ]; then
+        "$PY" scripts/bridge_status_publish.py --live \
+            >"$STATUS_DIR/publish.log" 2>&1 || true
+        touch "$STATUS_DIR/last-publish" 2>/dev/null || true
+    fi
+fi
+  
 exec "$PY" scripts/issue_poller.py \
     --repo "StevenMarketing/steven-ai-os" \
     --owner "StevenMarketing" \
