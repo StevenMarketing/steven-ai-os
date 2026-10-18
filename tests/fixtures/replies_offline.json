@@ -1,0 +1,16 @@
+[
+  {
+    "review_id": "rev-1001",
+    "location_id": "accounts/1001/locations/loc-001",
+    "reviewer": "Synthetic Guest A",
+    "rating": 5,
+    "comment": "loved my gel manicure the staff were so friendly"
+  },
+  {
+    "review_id": "rev-1002",
+    "location_id": "accounts/1001/locations/loc-005",
+    "reviewer": "Synthetic Guest B",
+    "rating": 2,
+    "comment": "waited a long time for my pedicure"
+  }
+]
