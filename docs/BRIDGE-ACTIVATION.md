@@ -191,3 +191,33 @@ stops, publishing stops, the status ages past 900 s, and the scheduled run goes 
 | publisher line in the cron shim | set `STEVEN_STATUS_PUBLISH=0` (immediate, no file change), then revert |
 | rejection wiring in the poller | set `STEVEN_INTAKE_REJECT_COMMENTS=0` (immediate), then revert |
 | status issue #46 | close it; its comments are inert data |
+
+
+## Follow-up (review on PR #47): the intake job now fails, not just logs
+
+The first version of the `intake-watchdog` job only produced a diagnostic log. Fixed:
+
+* `scripts/bridge_intake_preflight.py` gained `--fail-on-alert` and a single testable entry
+  point, `evaluate_intake()`, which returns `blocking` plus a flat structured `reasons` list.
+* The staleness reference now comes from the **trusted `hermes-ready` label event** read through
+  the API, so the alert works on an ephemeral GitHub runner with **no persisted state**
+  (`--no-record` is safe for exactly this reason). An existing claim, then a first-seen record
+  on a long-lived host, remain as fallbacks.
+* The workflow job now runs `... --stale-minutes 5 --no-record --fail-on-alert --json`, so an
+  invalid `hermes-ready` issue or one unclaimed past the threshold **turns the run red**.
+  The visible, structured rejection comment is still posted by the VPS poller, which is the only
+  place that already holds write access; the watchdog stays read-only (least privilege preserved).
+
+### Post-merge VPS deployment (a GitHub merge alone does not update the VPS)
+
+```sh
+ssh <vps>
+cd /opt/data/gbp-integration && git fetch origin main && git checkout main && git pull --ff-only origin main
+python3 scripts/bridge_status_publish.py --live --json          # expect code=published, issue 46
+tail -5 /opt/data/profiles/worker-agent/ops/bridge/publish.log  # cron cadence log
+bash /opt/data/scripts/github_worker_poll.sh                    # poll unchanged, fingerprint stable
+```
+Evidence to record after deploying: the new status comment URL, the poll fingerprint, and (for the
+watchdog) the first green Actions run plus a red run produced by the stale-heartbeat simulation
+above. Rollback remains the env flags (`STEVEN_STATUS_PUBLISH=0`, `STEVEN_INTAKE_REJECT_COMMENTS=0`)
+before any file revert.

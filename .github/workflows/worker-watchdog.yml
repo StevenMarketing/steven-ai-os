@@ -54,6 +54,11 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           STEVEN_INTAKE_OBSERVATIONS: ${{ runner.temp }}/intake-observations.json
         run: |
+          # --fail-on-alert makes this job red for a truly invalid hermes-ready issue or
+          # one that sat unclaimed past the threshold. Staleness comes from the trusted
+          # hermes-ready LABEL EVENT, so no state file is needed on this ephemeral runner
+          # (--no-record); the visible rejection comment itself is posted by the VPS
+          # poller, which is the only place that already has write access.
           python3 scripts/bridge_intake_preflight.py \
             --repo "${{ github.repository }}" \
-            --stale-minutes 5 --no-record --json
+            --stale-minutes 5 --no-record --fail-on-alert --json
