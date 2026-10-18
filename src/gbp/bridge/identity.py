@@ -116,10 +116,10 @@ def verify_identity(
             % (declared_actor, trusted.author_login)
         )
     declared_origin = str(envelope.get("origin") or "").strip()
-    if declared_origin and declared_origin != trusted.author_login:
+    if declared_origin and declared_origin != trusted.repository:
         return False, "origin_mismatch", (
-            "payload origin %s does not match the authenticated author %s"
-            % (declared_origin, trusted.author_login)
+            "payload origin %s does not match the authenticated repository %s"
+            % (declared_origin, trusted.repository)
         )
 
     allow = {str(x).strip() for x in allowlisted_logins if str(x).strip()}
@@ -138,25 +138,26 @@ def verify_identity(
 
 
 def fetch_trusted_context(
-    request,
+    request: Any,
     *,
     repository: str,
     source_kind: str,
     source_id: int,
+    token: str,
 ) -> TrustedContext:
     """Build a TrustedContext from GitHub API responses.
 
-    ``request`` is the existing ``issue_github.request``-shaped callable
-    ``(method, path, token, body=None) -> (payload, meta)``. Any failure yields a
-    context with ``verified=False`` so the caller fails closed.
+    ``request`` is the repository's existing authenticated transport,
+    ``issue_github.request(method, path, token, body=None) -> (payload, meta)``.
+    The caller supplies the token explicitly: no token is ever discovered
+    implicitly, and any lookup failure yields ``verified=False`` (fail closed).
     """
     if source_kind not in ALLOWED_SOURCE_KINDS:
         return TrustedContext(repository, source_kind, source_id, "", verified=False,
                               notes=("unsupported source",))
-    try:
-        token = request.__self__.read_token() if hasattr(request, "__self__") else None
-    except Exception:  # pragma: no cover - transport differences
-        token = None
+    if not token:
+        return TrustedContext(repository, source_kind, source_id, "", verified=False,
+                              notes=("no API token supplied",))
     try:
         payload, _ = request("GET", "/repos/%s/issues/comments/%d" % (repository, int(source_id)), token)
     except Exception as exc:  # fail closed

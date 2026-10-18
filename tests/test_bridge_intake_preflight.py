@@ -3,7 +3,9 @@ import unittest
 
 from gbp.bridge.intake import (
     REQUIRED_HEADINGS,
+    first_seen_update,
     preflight,
+    ready_since_from_events,
     render_rejection,
     unclaimed_eligible_alerts,
 )
@@ -81,30 +83,85 @@ class UnclaimedDetectionTests(unittest.TestCase):
     def issue(self, number, labels=("hermes-ready",), state="open"):
         return {"number": number, "state": state, "labels": [{"name": l} for l in labels]}
 
-    def test_eligible_issue_with_no_claim_alerts(self):
-        alerts = unclaimed_eligible_alerts([self.issue(43)], now=self.NOW)
-        self.assertEqual(alerts[0]["code"], "eligible_unclaimed")
-        self.assertEqual(alerts[0]["issue"], 43)
-
-    def test_fresh_claim_does_not_alert(self):
+    def iso(self, seconds_ago):
         from datetime import datetime, timezone
 
-        claimed = datetime.fromtimestamp(self.NOW - 60, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        return datetime.fromtimestamp(self.NOW - seconds_ago, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    # -- a brand new issue must NOT be cried wolf about ----------------------
+    def test_no_reference_time_is_only_an_observation(self):
+        alerts = unclaimed_eligible_alerts([self.issue(43)], now=self.NOW)
+        self.assertEqual(alerts[0]["code"], "eligible_unclaimed_unobserved")
+        self.assertEqual(alerts[0]["severity"], "info")
+        self.assertIsNone(alerts[0]["waiting_seconds"])
+
+    def test_ready_label_event_boundaries(self):
+        for minutes, expected in ((0, []), (4, []), (6, ["eligible_unclaimed"])):
+            alerts = unclaimed_eligible_alerts(
+                [self.issue(43)], now=self.NOW,
+                ready_since={"43": self.iso(minutes * 60)})
+            self.assertEqual([a["code"] for a in alerts], expected, "at %s minutes" % minutes)
+
+    def test_first_seen_observation_boundaries(self):
+        for minutes, expected in ((4, []), (6, ["eligible_unclaimed"])):
+            alerts = unclaimed_eligible_alerts(
+                [self.issue(43)], now=self.NOW, first_seen={"43": self.NOW - minutes * 60})
+            self.assertEqual([a["code"] for a in alerts], expected, "at %s minutes" % minutes)
+
+    def test_threshold_is_configurable(self):
         alerts = unclaimed_eligible_alerts([self.issue(43)], now=self.NOW,
-                                           claims={"43": {"claimed_at": claimed}})
+                                           ready_since={"43": self.iso(120)}, stale_minutes=1)
+        self.assertEqual(alerts[0]["code"], "eligible_unclaimed")
+        self.assertEqual(alerts[0]["reference"], "label_event")
+
+    # -- claimed / processed -------------------------------------------------
+    def test_fresh_claim_does_not_alert(self):
+        alerts = unclaimed_eligible_alerts([self.issue(43)], now=self.NOW,
+                                           claims={"43": {"claimed_at": self.iso(60)}})
         self.assertEqual(alerts, [])
 
-    def test_stale_claim_alerts_with_waiting_time(self):
-        from datetime import datetime, timezone
-
-        claimed = datetime.fromtimestamp(self.NOW - 900, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    def test_stale_claim_alerts_and_names_the_reference(self):
         alerts = unclaimed_eligible_alerts([self.issue(43)], now=self.NOW,
-                                           claims={"43": {"claimed_at": claimed}})
+                                           claims={"43": {"claimed_at": self.iso(900)}})
         self.assertEqual(alerts[0]["code"], "eligible_unclaimed")
+        self.assertEqual(alerts[0]["reference"], "claim")
         self.assertGreater(alerts[0]["waiting_seconds"], 600)
 
-    def test_processed_and_unlabelled_are_ignored(self):
+    def test_processed_and_unlabelled_and_closed_are_ignored(self):
         alerts = unclaimed_eligible_alerts(
             [self.issue(43), self.issue(44, labels=()), self.issue(45, state="closed")],
             now=self.NOW, processed={"43": {"outcome": "done"}})
         self.assertEqual(alerts, [])
+
+    def test_claim_beats_label_event_and_first_seen(self):
+        alerts = unclaimed_eligible_alerts(
+            [self.issue(43)], now=self.NOW, claims={"43": {"claimed_at": self.iso(30)}},
+            ready_since={"43": self.iso(9999)}, first_seen={"43": self.NOW - 9999})
+        self.assertEqual(alerts, [])
+
+    def test_first_seen_update_is_idempotent(self):
+        state = first_seen_update({}, [43, "44"], self.NOW)
+        again = first_seen_update(state, [43, "44", 45], self.NOW + 60)
+        self.assertEqual(again["43"], self.NOW)
+        self.assertEqual(again["45"], self.NOW + 60)
+        self.assertEqual(len(again), 3)
+
+
+class LabelEventTests(unittest.TestCase):
+    def test_ready_since_reads_the_trusted_label_event(self):
+        def request(method, path, token=None, body=None):
+            if path.endswith("/issues/43/events?per_page=100"):
+                return ([{"event": "labeled", "label": {"name": "hermes-ready"},
+                          "created_at": "2026-10-18T15:01:27Z"},
+                         {"event": "labeled", "label": {"name": "other"},
+                          "created_at": "2026-10-18T10:00:00Z"}], {})
+            raise AssertionError(path)
+
+        out = ready_since_from_events(request, "tok", "r/r", [{"number": 43}])
+        self.assertEqual(out, {"43": "2026-10-18T15:01:27Z"})
+
+    def test_event_lookup_failure_is_skipped(self):
+        def request(*a, **k):
+            raise RuntimeError("boom")
+
+        self.assertEqual(ready_since_from_events(request, "tok", "r/r", [{"number": 43}]), {})

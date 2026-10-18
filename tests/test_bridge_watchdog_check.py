@@ -20,12 +20,14 @@ def document(name="idle"):
 
 
 class WatchdogCheckTests(unittest.TestCase):
-    def _request(self, comments, issues=None):
+    def _request(self, comments, issues=None, label_events=None):
         def request(method, path, token=None, body=None):
             if "/comments" in path:
                 return (comments, {})
             if "labels=hermes-ready" in path:
                 return (issues or [], {})
+            if "/events" in path:
+                return (label_events or [], {})
             raise AssertionError(path)
 
         return request
@@ -53,9 +55,26 @@ class WatchdogCheckTests(unittest.TestCase):
         found = newest_status_document(self._request([comment(older), comment(document())]), "tok", REPO, 77)
         self.assertEqual(found["worker"]["state"], "idle")
 
-    def test_unclaimed_eligible_issue_is_reported(self):
+    def test_unclaimed_eligible_issue_with_an_old_label_is_reported(self):
         issues = [{"number": 43, "state": "open", "labels": [{"name": "hermes-ready"}]}]
-        out = collect_and_evaluate(self._request([comment(document())], issues), "tok", REPO, 77,
-                                   now=EPOCH + 60)
+        events = [{"event": "labeled", "label": {"name": "hermes-ready"},
+                   "created_at": "2027-01-15T07:00:00Z"}]          # an hour before EPOCH
+        out = collect_and_evaluate(self._request([comment(document())], issues, events),
+                                   "tok", REPO, 77, now=EPOCH + 60)
         self.assertFalse(out["ok"])
-        self.assertIn("eligible_unclaimed", [a["code"] for a in out["alerts"]])
+        codes = [a["code"] for a in out["alerts"]]
+        self.assertIn("eligible_unclaimed", codes)
+        self.assertGreaterEqual(out["blocking"], 1)
+
+    def test_brand_new_ready_issue_is_only_an_observation(self):
+        """A freshly labelled issue must not raise a false alarm."""
+        issues = [{"number": 50, "state": "open", "labels": [{"name": "hermes-ready"}]}]
+        events = [{"event": "labeled", "label": {"name": "hermes-ready"},
+                   "created_at": "2027-01-15T08:00:00Z"}]          # the same minute as EPOCH
+        out = collect_and_evaluate(self._request([comment(document())], issues, events),
+                                   "tok", REPO, 77, now=EPOCH + 60)
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["blocking"], 0)
+        for alert in out["alerts"]:
+            if alert["code"].startswith("eligible_unclaimed"):
+                self.assertEqual(alert["severity"], "info")

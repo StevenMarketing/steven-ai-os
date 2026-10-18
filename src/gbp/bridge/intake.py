@@ -19,6 +19,7 @@ and require owner approval. Nothing here modifies a protected file.
 from __future__ import annotations
 
 import re
+from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 __all__ = [
@@ -26,6 +27,8 @@ __all__ = [
     "preflight",
     "render_rejection",
     "unclaimed_eligible_alerts",
+    "first_seen_update",
+    "epoch_of",
     "label_names",
 ]
 
@@ -104,17 +107,91 @@ def render_rejection(issue_number: int, verdict: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def epoch_of(value: Any) -> Optional[float]:
+    """Parse an ISO-8601 timestamp or an epoch number into epoch seconds."""
+    if value is None or value == "":
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value).strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        stamp = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=timezone.utc)
+    return stamp.timestamp()
+
+
+def ready_since_from_events(
+    request: Any,
+    token: str,
+    repo: str,
+    issues: Iterable[Dict[str, Any]],
+) -> Dict[str, str]:
+    """Trusted ``hermes-ready`` label timestamps, read from GitHub issue events.
+
+    Returns ``{issue_number: created_at}`` for the newest ``labeled`` event whose
+    label is ``hermes-ready``. Failures are skipped silently: a missing reference
+    simply means the observer falls back to its own first-seen observation.
+    """
+    out: Dict[str, str] = {}
+    for issue in issues or []:
+        number = issue.get("number")
+        if number is None:
+            continue
+        try:
+            events, _ = request(
+                "GET", "/repos/%s/issues/%d/events?per_page=100" % (repo, int(number)), token)
+        except Exception:
+            continue
+        for event in events or []:
+            if str(event.get("event") or "") != "labeled":
+                continue
+            if str((event.get("label") or {}).get("name") or "") != "hermes-ready":
+                continue
+            stamp = str(event.get("created_at") or "")
+            if stamp:
+                out[str(number)] = stamp
+    return out
+
+
+def first_seen_update(state: Dict[str, Any], numbers: Iterable[Any], now: float) -> Dict[str, Any]:
+    """Record the first time each eligible issue was observed (idempotent)."""
+    updated = dict(state or {})
+    for number in numbers:
+        key = str(number)
+        if key not in updated:
+            updated[key] = float(now)
+    return updated
+
+
 def unclaimed_eligible_alerts(
     issues: Iterable[Dict[str, Any]],
     *,
     now: float,
     claims: Optional[Dict[str, Any]] = None,
     processed: Optional[Dict[str, Any]] = None,
+    ready_since: Optional[Dict[str, Any]] = None,
+    first_seen: Optional[Dict[str, Any]] = None,
     stale_minutes: float = 5.0,
 ) -> List[Dict[str, Any]]:
-    """Eligible issues (labelled hermes-ready) that nothing has claimed or finished."""
+    """Eligible issues (labelled ``hermes-ready``) that nothing has picked up.
+
+    An alert is only emitted once a *reference time* is known and the elapsed time
+    reaches the threshold. The reference is taken, in order, from an existing claim,
+    the trusted ``hermes-ready`` label event (``ready_since``) or the first time this
+    observer saw the issue (``first_seen``). With no reference at all the issue is
+    reported as ``eligible_unclaimed_unobserved`` with ``severity="info"``: an
+    observation is recorded for the next run, and nothing is cried wolf about.
+    """
     claims = claims or {}
     processed = processed or {}
+    ready_since = ready_since or {}
+    first_seen = first_seen or {}
+    threshold = float(stale_minutes) * 60.0
     alerts: List[Dict[str, Any]] = []
     for issue in issues:
         if str(issue.get("state") or "open") != "open":
@@ -124,31 +201,45 @@ def unclaimed_eligible_alerts(
         number = str(issue.get("number"))
         if number in processed:
             continue
-        claim = claims.get(number)
-        if claim is None:
-            waiting = None
-        else:
-            claimed_at = claim.get("claimed_at") if isinstance(claim, dict) else None
-            waiting = None
-            if isinstance(claimed_at, str) and claimed_at:
-                text = claimed_at[:-1] + "+00:00" if claimed_at.endswith("Z") else claimed_at
-                try:
-                    from datetime import datetime, timezone
 
-                    stamp = datetime.fromisoformat(text)
-                    if stamp.tzinfo is None:
-                        stamp = stamp.replace(tzinfo=timezone.utc)
-                    waiting = float(now) - stamp.timestamp()
-                except ValueError:
-                    waiting = None
-        if waiting is not None and waiting <= float(stale_minutes) * 60:
+        reference: Optional[float] = None
+        source: Optional[str] = None
+        claim = claims.get(number)
+        if isinstance(claim, dict):
+            claim_epoch = epoch_of(claim.get("claimed_at"))
+            if claim_epoch is not None:
+                reference, source = claim_epoch, "claim"
+        if reference is None:
+            label_epoch = epoch_of(ready_since.get(number))
+            if label_epoch is not None:
+                reference, source = label_epoch, "label_event"
+        if reference is None and number in first_seen:
+            seen_epoch = epoch_of(first_seen.get(number))
+            if seen_epoch is not None:
+                reference, source = seen_epoch, "first_seen"
+
+        if reference is None:
+            alerts.append({
+                "code": "eligible_unclaimed_unobserved",
+                "severity": "info",
+                "issue": int(number),
+                "waiting_seconds": None,
+                "reference": None,
+                "message": ("issue carries hermes-ready but has no reference time yet; "
+                            "observation recorded for the next check"),
+            })
+            continue
+
+        waiting = float(now) - reference
+        if waiting < threshold:
             continue
         alerts.append({
             "code": "eligible_unclaimed",
             "severity": "warning",
             "issue": int(number),
             "waiting_seconds": waiting,
-            "message": "issue carries hermes-ready but nothing claimed it for over %.0f minutes"
-                       % float(stale_minutes),
+            "reference": source,
+            "message": ("issue carries hermes-ready and nothing picked it up for %.0f minutes"
+                        % (waiting / 60.0)),
         })
     return alerts

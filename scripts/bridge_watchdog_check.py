@@ -21,7 +21,13 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from gbp.bridge.external_watchdog import evaluate_external  # noqa: E402
-from gbp.bridge.intake import unclaimed_eligible_alerts  # noqa: E402
+from gbp.bridge.intake import (  # noqa: E402
+    ready_since_from_events,
+    unclaimed_eligible_alerts,
+)
+
+OBSERVATIONS_PATH = os.environ.get("STEVEN_INTAKE_OBSERVATIONS",
+                                  "/opt/data/ops/bridge/intake-observations.json")
 
 DEFAULT_REPO = "StevenMarketing/steven-ai-os"
 
@@ -67,10 +73,21 @@ def collect_and_evaluate(
     try:
         issues, _ = request(
             "GET", "/repos/%s/issues?state=open&labels=hermes-ready&per_page=50" % repo, token)
-        alerts += unclaimed_eligible_alerts(issues or [], now=now, stale_minutes=stale_minutes)
+        issues = issues or []
+        ready_since = ready_since_from_events(request, token, repo, issues)
+        try:
+            with open(OBSERVATIONS_PATH, encoding="utf-8") as fh:
+                observations = json.load(fh)
+        except Exception:
+            observations = {}
+        alerts += unclaimed_eligible_alerts(
+            issues, now=now, ready_since=ready_since, first_seen=observations,
+            stale_minutes=stale_minutes)
     except Exception:
         pass
-    return {"ok": not alerts, "alerts": alerts, "age_seconds": verdict["age_seconds"],
+    blocking = [a for a in alerts if a.get("severity") != "info"]
+    return {"ok": not blocking, "alerts": alerts, "blocking": len(blocking),
+            "age_seconds": verdict["age_seconds"],
             "independence": verdict["independence"], "have_status": document is not None}
 
 
