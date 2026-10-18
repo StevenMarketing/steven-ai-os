@@ -11,6 +11,15 @@ This module implements the human-in-the-loop reply lifecycle required by issue
   is disabled -- it records the publish *intent* and then raises. There is no
   code path that publishes a reply automatically, and no network call is ever
   made (an optional transport object is accepted but never used).
+
+Canonical path
+--------------
+This is an **in-memory prototype** and is *not* the canonical approval path.
+The canonical, DB-backed workflow used by the API, the web UI and the offline
+integration seam is :class:`gbp.workflow.service.ApprovalService` (see
+``docs/GREPLY-APPROVAL-WORKFLOW.md``). Nothing outside ``gbp.replies`` may
+import this module; a regression test in ``tests/test_greply_approval_seam.py``
+enforces that.
 """
 
 from __future__ import annotations
