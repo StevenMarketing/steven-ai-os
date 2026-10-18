@@ -133,3 +133,61 @@ monitor output does not change. The structured reason is also written to
   privileged operation is reachable. Activation of execution remains a separate, owner-approved step.
 * `scripts/**` files added here (`bridge_status_publish.py`, `bridge_intake_preflight.py`) are not
   protected paths, so they can ship with this PR; the poller and cron shims cannot, and are not touched.
+
+
+---
+
+# ACTIVATION RECORD — Issue #45 (monitoring made live)
+
+Owner authorization: "I authorize you to proceed with the safe implementation, testing,
+merging, and deployment of the monitoring system, subject to all existing security and
+protected-file policies." Protected files in this record were changed under the repository's
+own documented owner-maintenance escape hatch (`HERMES_ALLOW_PROTECTED=1`, which lifts only the
+protected-path rule — the secret check still runs), on a branch, for review. Nothing was merged
+by the assistant.
+
+## What is live now
+
+| Component | State | Evidence |
+|---|---|---|
+| Machine-readable status issue | **live** | https://github.com/StevenMarketing/steven-ai-os/issues/46 — redacted JSON with a real `generated_at`, cron `every 1m`, `last_status`, worker `idle`, budget spend |
+| Status publisher | **wired** | `scripts/cron/github_worker_poll.sh` publishes at most once every 10 minutes, output redirected to `ops/bridge/publish.log`, stdout untouched |
+| Structured intake rejection | **wired** | the poller posts one deduplicated rejection comment per (issue, body) via `gbp.bridge.intake`, state in `ops/bridge/intake-rejections.json`, stdout untouched |
+| External watchdog | **workflow ready** | `.github/workflows/worker-watchdog.yml` — two scheduled jobs on GitHub's own infrastructure, least privilege (`contents: read`, `issues: read`), `--fail-on-alert` turns a stale/missing status into a red run |
+
+## Why the watchdog is genuinely independent
+
+The workflow runs on GitHub's runners, not the VPS. It does not read anything the VPS writes except
+the published status comment, and it recomputes age from `generated_at` against the runner's own
+clock, so a frozen `document_age_seconds` cannot fake freshness. If the VPS, its cron or Hermes
+stops, publishing stops, the status ages past 900 s, and the scheduled run goes red with an
+`status_missing` / `status_stale` alert in its log.
+
+## Verification performed for this activation
+
+| Check | Result |
+|---|---|
+| Live publish | comment posted on #46, no `sk-`/token-shaped string in the payload |
+| Read-back from GitHub | cron and worker fields parsed straight from the comment |
+| Poller after wiring | poll runs normally; rejection path is env-gated and deduplicated |
+| Tests | full suite green (see the activation PR for the exact count) |
+| Guards | `verify-diff` on the branch reports the three intentionally protected files |
+
+## How to simulate a stale heartbeat (owner-run)
+
+1. Publish once so a fresh status exists (`python3 scripts/bridge_status_publish.py --live`).
+2. Stop the publisher for more than 15 minutes (set `STEVEN_STATUS_PUBLISH=0` in the cron
+   environment, or pause the worker job: `hermes -p worker-agent cron pause b4a0d80c816e`).
+3. Trigger the workflow (`workflow_dispatch`) or wait for the schedule: the `status-watchdog` job
+   fails with `status_stale` and prints the age it measured with its own clock.
+4. Recovery: re-enable publishing; the next run is green again — no state needs repairing,
+   because the watchdog is read-only.
+
+## Rollback
+
+| Change | Rollback |
+|---|---|
+| `.github/workflows/worker-watchdog.yml` | delete the file on a branch and merge; it holds no state |
+| publisher line in the cron shim | set `STEVEN_STATUS_PUBLISH=0` (immediate, no file change), then revert |
+| rejection wiring in the poller | set `STEVEN_INTAKE_REJECT_COMMENTS=0` (immediate), then revert |
+| status issue #46 | close it; its comments are inert data |

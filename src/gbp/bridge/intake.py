@@ -27,6 +27,10 @@ __all__ = [
     "preflight",
     "render_rejection",
     "unclaimed_eligible_alerts",
+    "rejection_fingerprint",
+    "rejection_key",
+    "should_post_rejection",
+    "record_rejection",
     "first_seen_update",
     "epoch_of",
     "label_names",
@@ -105,6 +109,39 @@ def render_rejection(issue_number: int, verdict: Dict[str, Any]) -> str:
         "_Structured, deterministic message from `gbp.bridge.intake` — no model was called._",
     ]
     return "\n".join(lines)
+
+
+def rejection_fingerprint(body: Any) -> str:
+    """Stable key for the body an issue was rejected for (so one alert per body)."""
+    import hashlib
+
+    return hashlib.sha256(str(body or "").encode("utf-8")).hexdigest()[:16]
+
+
+def rejection_key(issue_number: Any, body: Any) -> str:
+    return "%s:%s" % (int(issue_number), rejection_fingerprint(body))
+
+
+def should_post_rejection(
+    state: Dict[str, Any],
+    key: str,
+    now: float,
+    cooldown_seconds: float = 21600.0,
+) -> bool:
+    """True when this rejection has not been posted yet (or the cooldown expired)."""
+    seen = (state or {}).get(key)
+    if seen is None:
+        return True
+    try:
+        return (float(now) - float(seen)) >= float(cooldown_seconds)
+    except (TypeError, ValueError):
+        return True
+
+
+def record_rejection(state: Dict[str, Any], key: str, now: float) -> Dict[str, Any]:
+    updated = dict(state or {})
+    updated[key] = float(now)
+    return updated
 
 
 def epoch_of(value: Any) -> Optional[float]:

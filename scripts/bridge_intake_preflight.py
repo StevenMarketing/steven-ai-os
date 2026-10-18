@@ -77,10 +77,13 @@ def main(argv=None) -> int:
     args = ap.parse_args(argv)
 
     import issue_github
-    import issue_poller
     import issue_worker_lib
 
-    token = issue_poller.read_token("/opt/data/.env")
+    token = os.environ.get("GITHUB_TOKEN") or ""
+    if not token:                      # local runs read the repository token file
+        import issue_poller
+
+        token = issue_poller.read_token("/opt/data/.env")
     issues, _ = issue_github.request(
         "GET", "/repos/%s/issues?state=open&labels=hermes-ready&per_page=50" % args.repo, token)
 

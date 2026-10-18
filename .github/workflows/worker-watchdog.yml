@@ -1,0 +1,59 @@
+name: worker-watchdog
+
+# External, VPS-independent monitoring. Runs on GitHub's infrastructure, so it keeps
+# working when the VPS, its cron or its Hermes process stops. Two independent jobs:
+#   * status-watchdog: reads the newest status comment from the machine-readable
+#     status issue and fails when it is missing or stale, using GitHub's own clock.
+#   * intake-watchdog: flags a hermes-ready issue that nothing has picked up.
+#
+# Least privilege: read-only repository access plus issue read. No write permission,
+# no secrets beyond the automatic GITHUB_TOKEN.
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  issues: read
+
+concurrency:
+  group: worker-watchdog-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  status-watchdog:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Evaluate published worker status age (independent clock)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          STATUS_ISSUE_NUMBER: "46"
+        run: |
+          python3 scripts/bridge_watchdog_check.py \
+            --repo "${{ github.repository }}" \
+            --issue-number "${STATUS_ISSUE_NUMBER}" \
+            --max-age-seconds 900 \
+            --fail-on-alert \
+            --json
+
+  intake-watchdog:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Report hermes-ready issues that cannot be used or were never claimed
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          STEVEN_INTAKE_OBSERVATIONS: ${{ runner.temp }}/intake-observations.json
+        run: |
+          python3 scripts/bridge_intake_preflight.py \
+            --repo "${{ github.repository }}" \
+            --stale-minutes 5 --no-record --json

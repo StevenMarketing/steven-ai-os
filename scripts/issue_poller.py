@@ -153,6 +153,75 @@ def collect(issues: List[Dict[str, Any]], events: Dict[str, List[Dict[str, Any]]
                        "total": len(verdicts)}}
 
 
+# --- structured intake rejection (activation of gbp.bridge.intake) -------------
+# Wired by Issue #45. Off unless STEVEN_INTAKE_REJECT_COMMENTS=1, posts at most one
+# comment per (issue, body) pair, and never raises into the poll.
+
+_INTAKE_STATE = "/opt/data/ops/bridge/intake-rejections.json"
+
+
+def _intake_rejections_enabled() -> bool:
+    return os.environ.get("STEVEN_INTAKE_REJECT_COMMENTS", "0") == "1"
+
+
+def _load_intake_state() -> Dict[str, Any]:
+    try:
+        with open(_INTAKE_STATE, encoding="utf-8") as handle:
+            data = json.load(handle)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _save_intake_state(state: Dict[str, Any]) -> None:
+    try:
+        os.makedirs(os.path.dirname(_INTAKE_STATE), exist_ok=True)
+        tmp = _INTAKE_STATE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as handle:
+            json.dump(state, handle, indent=2, sort_keys=True)
+        os.replace(tmp, _INTAKE_STATE)
+    except Exception:
+        pass
+
+
+def _maybe_post_rejection(row: Dict[str, Any], token_file: str, repo: str) -> None:
+    """Post one structured rejection comment for an unusable hermes-ready issue."""
+    if not _intake_rejections_enabled():
+        return
+    try:
+        import sys as _sys
+        import time as _time
+        from pathlib import Path as _Path
+
+        _sys.path.insert(0, str(_Path(__file__).resolve().parents[1] / "src"))
+        import issue_github as _gh
+        from gbp.bridge.intake import (
+            preflight,
+            record_rejection,
+            rejection_key,
+            render_rejection,
+            should_post_rejection,
+        )
+
+        number = int(row["number"])
+        token = read_token(token_file)
+        issue, _ = _gh.request("GET", "/repos/%s/issues/%d" % (repo, number), token)
+        body = issue.get("body") or ""
+        verdict = preflight(body, patterns=lib.INJECTION_PATTERNS)
+        if verdict["usable"]:
+            return
+        key = rejection_key(number, body)
+        state = _load_intake_state()
+        now = _time.time()
+        if not should_post_rejection(state, key, now):
+            return
+        _gh.request("POST", "/repos/%s/issues/%d/comments" % (repo, number), token,
+                    body={"body": render_rejection(number, verdict)})
+        _save_intake_state(record_rejection(state, key, now))
+    except Exception:
+        return  # intake reporting must never break the poll
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         description="Poll GitHub for hermes-ready issues.",
@@ -214,6 +283,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         if row["injection"]:
             detail += " | injection: " + ",".join(row["injection"])
         print(f"  skipped #{row['number']} {row['title']}  ({detail})")
+        _maybe_post_rejection(
+            row,
+            args.token_file or os.environ.get("STEVEN_TOKEN_FILE", "/opt/data/.env"),
+            args.repo)
     return 0
 
 
