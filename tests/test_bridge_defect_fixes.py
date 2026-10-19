@@ -758,3 +758,100 @@ class HardeningTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FinalSafetyChecksTests(unittest.TestCase):
+    """Check 1: unreadable markers alert. Check 2: every FAILED has authoritative proof."""
+
+    def setUp(self):
+        self.claims = tempfile.mkdtemp()
+        self.snapshot = LedgerSnapshot(claims_dir=self.claims)
+
+    def _guard(self, labels):
+        def request(method, path, token=None, body=None):
+            return ({"number": 57, "labels": [{"name": n} for n in labels]}, {})
+        return request
+
+    # --- 1. corrupted / unreadable markers -------------------------------------------------
+    def test_corrupted_marker_produces_a_manual_review_alert(self):
+        from bridge_commands import reconcile_pending_markers
+        os.makedirs(self.claims, exist_ok=True)
+        bad = os.path.join(self.claims, "corrupt.claim")
+        with open(bad, "w", encoding="utf-8") as handle:
+            handle.write("{not json at all")
+        summary = reconcile_pending_markers(self._guard(["hermes-ready"]), "tok", REPO, self.snapshot)
+        self.assertEqual(summary["unreadable"], 1)
+        self.assertEqual(summary["review"][0]["reason"], "marker_unreadable")
+        self.assertTrue(os.path.exists(bad), "an unreadable marker is never deleted")
+
+    def test_unreadable_file_is_reported_and_not_deleted(self):
+        import stat
+        from bridge_commands import reconcile_pending_markers
+        os.makedirs(self.claims, exist_ok=True)
+        blocked = os.path.join(self.claims, "blocked.claim")
+        with open(blocked, "w", encoding="utf-8") as handle:
+            handle.write("{}")
+        os.chmod(blocked, 0)
+        try:
+            summary = reconcile_pending_markers(self._guard([]), "tok", REPO, self.snapshot)
+            if os.geteuid() == 0:                      # root can read anything
+                self.assertEqual(summary["unreadable"], 0)
+            else:
+                self.assertEqual(summary["unreadable"], 1)
+                self.assertEqual(summary["review"][0]["reason"], "marker_unreadable")
+            self.assertTrue(os.path.exists(blocked))
+        finally:
+            os.chmod(blocked, stat.S_IRUSR | stat.S_IWUSR)
+
+    def test_gate_refuses_a_corrupted_marker_visibly(self):
+        payload = envelope()
+        path = self.snapshot._claim_path(payload["idempotency_key"])
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write("{{ broken")
+        self.assertEqual(self.snapshot.pending_state(payload["idempotency_key"]), "unknown")
+
+    # --- 2. audit of every FAILED outcome ---------------------------------------------------
+    def _classify(self, receipt, result_extra=None):
+        from bridge_commands import _settle_ledger_for_execution
+        payload = envelope()
+        self.snapshot.claim(payload["idempotency_key"], payload["request_id"])
+        result = {"receipt": receipt}
+        result.update(result_extra or {})
+        return _settle_ledger_for_execution(self.snapshot, payload, {"result": result})
+
+    def test_never_attempted_with_a_mutation_block_is_failed(self):
+        self.assertEqual(self._classify({"mutation": {"attempted": False, "mutated": False}}),
+                         "failed")
+
+    def test_gate_refusal_is_authoritative_no_mutation(self):
+        self.assertEqual(self._classify({"admitted": False, "mutated": False,
+                                         "mutation": {"attempted": False, "mutated": False}}),
+                         "failed")
+
+    def test_no_mutation_evidence_at_all_is_unknown_not_failed(self):
+        self.assertEqual(self._classify({}), "unknown")
+        self.assertEqual(self._classify({"admitted": True}), "unknown")
+
+    def test_attempted_without_confirmation_is_unknown(self):
+        self.assertEqual(self._classify({"mutation": {"attempted": True, "mutated": False}}),
+                         "unknown")
+
+    def test_stated_failed_requires_the_caller_to_have_proof(self):
+        self.assertEqual(self._classify({"mutation": {"outcome": "failed", "attempted": True}}),
+                         "failed")          # explicit, structured, caller-owned
+        self.assertEqual(self._classify({"admitted": True, "mutated": False}), "unknown")
+
+    def test_reconcile_only_yields_failed_with_authoritative_proof(self):
+        payload = envelope()
+        self.snapshot.claim(payload["idempotency_key"], payload["request_id"], issue=57)
+        without_proof = self.snapshot.reconcile(payload["idempotency_key"], label_present=False,
+                                                now=time.time() + 10 * 86400)
+        self.assertEqual(without_proof["state"], "unknown")
+        with_proof = self.snapshot.reconcile(payload["idempotency_key"], label_present=False,
+                                             authoritative_failure=True)
+        self.assertEqual(with_proof["state"], "failed")
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -439,10 +439,14 @@ def _settle_ledger_for_execution(ledger: "LedgerSnapshot", envelope: Dict[str, A
                                  execution: Dict[str, Any]) -> str:
     """Record the durable outcome from STRUCTURED evidence, never from error text.
 
-    ``outcome`` wins when the caller states it explicitly; otherwise ``mutated`` true ->
-    confirmed, the mutation was never attempted -> failed (an authoritative no-mutation),
-    and attempted-but-not-proven -> UNKNOWN, because without authoritative proof we cannot
-    claim the API did not apply it.
+    Audit of every path that can yield FAILED (a claim about the real world):
+      * ``outcome="failed"`` stated by the caller        -> only a caller holding proof may say so;
+      * ``mutation.attempted is False`` with a mutation block present -> the mutation stage ran
+        and decided not to write: authoritative no-mutation;
+      * the gate refused before the mutation stage (``receipt.admitted is False``) -> no POST
+        could have happened: authoritative no-mutation.
+    Anything else -- including a receipt with no mutation evidence at all -- is UNKNOWN,
+    because we cannot prove the API did not apply the mutation.
     """
     result = execution.get("result") or {}
     receipt = result.get("receipt") or {}
@@ -451,20 +455,19 @@ def _settle_ledger_for_execution(ledger: "LedgerSnapshot", envelope: Dict[str, A
     if stated == ledger.CONFIRMED:
         state, reason = ledger.CONFIRMED, "stated_confirmed"
     elif stated == ledger.FAILED:
-        state, reason = ledger.FAILED, "stated_failed"
+        state, reason = ledger.FAILED, "stated_failed_by_caller_with_proof"
     elif stated == ledger.UNKNOWN:
         state, reason = ledger.UNKNOWN, "stated_unknown"
     elif result.get("mutated") or mutation.get("mutated"):
         state, reason = ledger.CONFIRMED, "mutation_confirmed"
-    elif mutation.get("attempted") is False:
+    elif mutation.get("attempted") is False and mutation:
         state, reason = ledger.FAILED, "mutation_never_attempted"
-    elif mutation.get("attempted"):
-        state, reason = ledger.UNKNOWN, "attempted_outcome_unproven"
+    elif receipt.get("admitted") is False:
+        state, reason = ledger.FAILED, "gate_refused_before_mutation"
     else:
-        state, reason = ledger.FAILED, "nothing_to_mutate"
+        state, reason = ledger.UNKNOWN, "no_authoritative_mutation_evidence"
     ledger.settle(envelope.get("idempotency_key"), envelope.get("request_id"), state, reason)
     return state
-
 
 def reconcile_pending_markers(request: Callable[..., Any], token: str, repo: str,
                               ledger: "LedgerSnapshot", *, limit: int = 25) -> Dict[str, Any]:
@@ -473,7 +476,7 @@ def reconcile_pending_markers(request: Callable[..., Any], token: str, repo: str
     Strict evidence rules: a missing label or an elapsed TTL never yields ``failed``; GitHub
     being unreachable yields ``unknown`` plus manual review. Markers are never deleted.
     """
-    summary = {"checked": 0, "confirmed": 0, "failed": 0, "review": []}
+    summary = {"checked": 0, "confirmed": 0, "failed": 0, "unreadable": 0, "review": []}
     try:
         names = sorted(os.listdir(ledger.claims_dir))[:limit]
     except OSError:
@@ -485,8 +488,12 @@ def reconcile_pending_markers(request: Callable[..., Any], token: str, repo: str
         try:
             with open(path, "r", encoding="utf-8") as stream:
                 marker = json.load(stream)
-        except Exception:
-            continue                    # unreadable marker: kept for an operator to inspect
+        except Exception as exc:
+            # Never a silent skip: an unreadable marker is precisely what a human must see.
+            summary["unreadable"] += 1
+            summary["review"].append({"marker": name, "reason": "marker_unreadable",
+                                      "detail": type(exc).__name__})
+            continue
         if str(marker.get("state") or "") not in ("pending", "unknown"):
             continue
         summary["checked"] += 1
