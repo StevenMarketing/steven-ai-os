@@ -355,3 +355,71 @@ class PartialClaimRecoveryTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ConcurrentPersistenceTests(unittest.TestCase):
+    """Fix 2: two processes persisting at once must not lose each other's identifiers."""
+
+    CHILD_SAVE = r"""
+import json, os, sys, time
+ROOT = os.environ["FIX2ROOT"]
+sys.path.insert(0, os.path.join(ROOT, "src")); sys.path.insert(0, os.path.join(ROOT, "scripts"))
+while not os.path.exists(os.environ["GOFILE"]):
+    time.sleep(0.005)
+from bridge_commands import LedgerSnapshot
+snap = LedgerSnapshot()                 # claims dir comes from STEVEN_BRIDGE_CLAIMS_DIR
+snap.claim(os.environ["K"], os.environ["R"])
+for _ in range(25):                      # persist repeatedly, the way a runner does
+    snap.save(os.environ["LEDGER"])
+print("saved")
+"""
+
+    def test_two_processes_saving_concurrently_keep_every_identifier(self):
+        import subprocess
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        work = tempfile.mkdtemp()
+        go = os.path.join(work, "go")
+        ledger = os.path.join(work, "command-ledger.json")
+        child = tempfile.mktemp(suffix=".py")
+        with open(child, "w", encoding="utf-8") as handle:
+            handle.write(self.CHILD_SAVE)
+
+        base = dict(os.environ)
+        base.update({"FIX2ROOT": root, "GOFILE": go, "LEDGER": ledger,
+                     "STEVEN_BRIDGE_CLAIMS_DIR": os.path.join(work, "claims"),
+                     "PYTHONPATH": os.path.join(root, "src") + os.pathsep + os.path.join(root, "scripts")})
+        procs = []
+        for index in (1, 2):
+            procs.append(subprocess.Popen([sys.executable, child],
+                                          env=dict(base, K="idem-%d" % index, R="req-%d" % index),
+                                          stdout=subprocess.PIPE, stderr=subprocess.PIPE))
+        time.sleep(0.2)
+        open(go, "w").close()                 # release both writers together
+        for proc in procs:
+            out, err = proc.communicate(timeout=90)
+            self.assertIn("saved", out.decode(), err.decode()[-300:])
+
+        # after a "restart": a fresh read of the persisted ledger
+        restored = LedgerSnapshot.from_file(ledger)
+        for index in (1, 2):
+            self.assertEqual(restored.seen("idem-%d" % index), "idem-%d" % index,
+                             "a concurrently persisted idempotency key was lost")
+            self.assertEqual(restored.seen_request("req-%d" % index), "req-%d" % index,
+                             "a concurrently persisted request id was lost")
+
+    def test_save_never_overwrites_identifiers_it_does_not_know(self):
+        work = tempfile.mkdtemp()
+        ledger = os.path.join(work, "ledger.json")
+        first = LedgerSnapshot(claims_dir=os.path.join(work, "c1"))
+        first.claim("idem-a", "req-a")
+        first.save(ledger)
+        second = LedgerSnapshot(claims_dir=os.path.join(work, "c2"))
+        second.claim("idem-b", "req-b")
+        second.save(ledger)                    # must merge, not replace
+        restored = LedgerSnapshot.from_file(ledger)
+        for value in ("idem-a", "req-a", "idem-b", "req-b"):
+            self.assertEqual(restored.seen(value) or restored.seen_request(value), value)
+
+
+if __name__ == "__main__":
+    unittest.main()

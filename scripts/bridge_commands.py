@@ -134,6 +134,40 @@ class LedgerSnapshot:
         self.claims_dir = claims_dir or (os.environ.get("STEVEN_BRIDGE_CLAIMS_DIR")
                                          or self.CLAIMS_DIR)
 
+    def merge(self, keys: Any = None, requests: Any = None) -> None:
+        """Union in identifiers discovered in a concurrently written ledger file."""
+        self._keys |= set(keys or ())
+        self._requests |= set(requests or ())
+
+    def save(self, path: Optional[str] = None) -> None:
+        """Merge this snapshot into ``path`` under an exclusive lock, atomically.
+
+        Two runners persisting at the same time used to be a last-writer-wins overwrite,
+        which silently dropped the other process's identifiers and made them replayable
+        after a restart. The read-modify-write below is serialised with ``flock`` and
+        published with an atomic rename, so no recorded key or request id is ever lost.
+        """
+        import fcntl
+        target = path or LEDGER_PATH
+        try:
+            os.makedirs(os.path.dirname(os.path.abspath(target)), mode=0o700, exist_ok=True)
+        except OSError:
+            return
+        try:
+            with open(target + ".lock", "a+", encoding="utf-8") as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX)
+                try:
+                    stored = _load_json(target) or {}
+                    self.merge(stored.get("keys"), stored.get("requests"))
+                    temporary = "%s.tmp-%d" % (target, os.getpid())
+                    with open(temporary, "w", encoding="utf-8") as stream:
+                        json.dump(self.to_dict(), stream)
+                    os.replace(temporary, target)
+                finally:
+                    fcntl.flock(lock, fcntl.LOCK_UN)
+        except OSError:
+            pass
+
     @classmethod
     def from_file(cls, path: str) -> "LedgerSnapshot":
         data = _load_json(path)
@@ -469,7 +503,7 @@ def main(argv=None, request: Optional[Callable[..., Any]] = None,
 
     if not args.no_post:
         _save_json(PROCESSED_PATH, processed)
-        _save_json(LEDGER_PATH, _PRE_VALIDATION_LEDGER.to_dict())
+        _PRE_VALIDATION_LEDGER.save(LEDGER_PATH)
     print(json.dumps(results, indent=2, sort_keys=True) if args.json
           else "bridge: %s" % json.dumps(results, sort_keys=True)[:600])
     return 0
