@@ -196,6 +196,102 @@ class LedgerSnapshot:
             except OSError:
                 pass
 
+    PENDING = "pending"
+    CONFIRMED = "confirmed"
+    FAILED = "failed"
+    UNKNOWN = "unknown"
+
+    def pending_state(self, value: Any) -> Optional[str]:
+        """The recorded state of a claimed identifier, or None when it was never claimed.
+
+        An unreadable marker reports ``unknown`` -- never "fine": we cannot tell what
+        happened, so the caller must fail closed and ask for manual review. Markers are
+        never deleted here.
+        """
+        if not isinstance(value, str) or not value:
+            return None
+        path = self._claim_path(value)
+        try:
+            with open(path, "r", encoding="utf-8") as stream:
+                return str(json.load(stream).get("state") or self.UNKNOWN)
+        except FileNotFoundError:
+            return None
+        except Exception:
+            return self.UNKNOWN
+
+    def settle(self, idempotency_key: Any, request_id: Any, state: str,
+               reason: str = "") -> None:
+        """Atomically record the outcome for this command in every one of its markers.
+
+        The identifiers of one command are stored in both markers, so settling one settles
+        its sibling too -- otherwise a request_id marker would stay pending forever and the
+        gate would keep refusing a command whose mutation is already confirmed. No file lock
+        is taken, so this can never deadlock against a ``save()`` holding the ledger lock.
+        """
+        pending = [value for value in (idempotency_key, request_id)
+                   if isinstance(value, str) and value]
+        seen = set()
+        for value in list(pending):
+            try:
+                with open(self._claim_path(value), "r", encoding="utf-8") as stream:
+                    marker = json.load(stream)
+                for sibling in (marker.get("idempotency_key"), marker.get("request_id")):
+                    if isinstance(sibling, str) and sibling and sibling not in seen:
+                        seen.add(sibling)
+                        pending.append(sibling)
+            except Exception:
+                continue
+            seen.add(value)
+        for value in pending:
+            self._write_state(value, state, reason)
+        self.record(idempotency_key, request_id)
+
+    def _write_state(self, value: str, state: str, reason: str) -> None:
+        """Atomically rewrite one marker (tmp + fsync + rename); never deletes it."""
+        path = self._claim_path(value)
+        if not os.path.exists(path):
+            return
+        temporary = "%s.state-%d-%d" % (path, os.getpid(), int(time.time() * 1e6))
+        try:
+            with open(temporary, "w", encoding="utf-8") as stream:
+                json.dump({"state": state, "value": value, "reason": reason,
+                           "settled_at": int(time.time())}, stream)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, path)
+        except OSError:
+            pass
+
+    def reconcile(self, value: Any, *, label_present: Optional[bool],
+                  api_error: bool = False, authoritative_failure: bool = False,
+                  now: Optional[float] = None) -> Dict[str, Any]:
+        """Decide the outcome of an interrupted command from evidence -- conservatively.
+
+        * GitHub unreachable                 -> `unknown`, manual review (never assumed failed);
+        * label present                      -> `confirmed` (the intended label state holds);
+          attribution to this exact request is recorded as uncertain, because a label can
+          also come from another actor;
+        * label absent, no authoritative proof -> `unknown`, manual review. An elapsed TTL
+          is NOT evidence that nothing happened, so it never decides `failed` by itself;
+        * authoritative_failure=True          -> `failed` (only when a caller holds real proof
+          that no mutation was applied, e.g. the API answered and refused before applying).
+        """
+        moment = time.time() if now is None else now
+        if authoritative_failure and not label_present:
+            self.settle(value, None, self.FAILED, "authoritative_no_mutation")
+            return {"state": self.FAILED, "reason": "authoritative_no_mutation"}
+        if api_error:
+            self.settle(value, None, self.UNKNOWN, "github_unavailable")
+            return {"state": self.UNKNOWN, "reason": "github_unavailable",
+                    "requires_manual_review": True}
+        if label_present is True:
+            self.settle(value, None, self.CONFIRMED, "label_present_attribution_uncertain")
+            return {"state": self.CONFIRMED, "reason": "label_present",
+                    "attribution_uncertain": True}
+        self.settle(value, None, self.UNKNOWN, "no_label_no_authoritative_evidence")
+        return {"state": self.UNKNOWN, "reason": "no_label_no_authoritative_evidence",
+                "requires_manual_review": True, "age_seconds": moment}
+
     def record(self, idempotency_key: Any, request_id: Any) -> None:
         for value, target in ((idempotency_key, self._keys), (request_id, self._requests)):
             if isinstance(value, str) and value:
@@ -233,6 +329,7 @@ class LedgerSnapshot:
         except OSError:
             return False
         created: List[str] = []
+        moment = int(time.time())
         for value in (idempotency_key, request_id):
             if not (isinstance(value, str) and value):
                 continue
@@ -249,7 +346,11 @@ class LedgerSnapshot:
                 self._rollback(created)
                 return False
             with os.fdopen(handle, "w", encoding="utf-8") as stream:
-                stream.write("claimed\n")
+                # The marker itself is the durable state: pending until settled.
+                json.dump({"state": self.PENDING, "value": value,
+                           "idempotency_key": idempotency_key,
+                           "request_id": request_id,
+                           "created_at": moment}, stream)
             created.append(path)
         self.record(idempotency_key, request_id)
         return True
@@ -328,6 +429,30 @@ def live_gate_factory(
     return gate
 
 
+
+def _settle_ledger_for_execution(ledger: "LedgerSnapshot", envelope: Dict[str, Any],
+                                 execution: Dict[str, Any]) -> str:
+    """Record the durable outcome of one executed command.
+
+    ``mutated`` true            -> confirmed (the label API confirmed the mutation);
+    a transport-style failure   -> unknown (GitHub may or may not have applied it);
+    anything else that ran      -> failed (the API answered and no mutation was applied).
+    """
+    result = execution.get("result") or {}
+    receipt = result.get("receipt") or {}
+    mutation = receipt.get("mutation") or result.get("mutation") or {}
+    detail = "%s %s %s" % (result.get("reason") or "", result.get("error") or "",
+                           mutation.get("error") or "")
+    if result.get("mutated") or mutation.get("mutated"):
+        state, reason = ledger.CONFIRMED, "label_confirmed"
+    elif any(word in detail.lower() for word in ("transport", "timeout", "timed out", "502", "503", "504", "unavailable")):
+        state, reason = ledger.UNKNOWN, "github_unavailable"
+    else:
+        state, reason = ledger.FAILED, "no_mutation_applied"
+    ledger.settle(envelope.get("idempotency_key"), envelope.get("request_id"), state, reason)
+    return state
+
+
 def process_comment(
     request: Callable[..., Any],
     token: str,
@@ -403,7 +528,7 @@ def process_comment(
     # Only now does the gate's snapshot learn this key: the current command has finished,
     # so a later command with the same idempotency key is a genuine replay and is refused
     # (this is what makes duplicate rejection survive a restart, since the snapshot is persisted).
-    _PRE_VALIDATION_LEDGER.record(envelope.get("idempotency_key"), envelope.get("request_id"))
+    _settle_ledger_for_execution(_PRE_VALIDATION_LEDGER, envelope, execution)
     processed[cid] = {"state": execution["state"], "request_id": validated.get("request_id"),
                       "at": now}
     out.update(action="executed", execution=execution)

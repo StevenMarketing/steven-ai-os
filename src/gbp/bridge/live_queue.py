@@ -259,6 +259,16 @@ def evaluate_live_queue(
             return refuse("already_processed", request_id)
         if ledger is not None and isinstance(idem_key, str):
             try:
+                # FIRST check, at the real admission gate: an identifier left in "pending"
+                # or "unknown" means the outcome of an earlier attempt cannot be established.
+                # Fail closed, report it distinctly, and never replay it automatically.
+                if hasattr(ledger, "pending_state"):
+                    for candidate in (idem_key, request_id):
+                        if not (isinstance(candidate, str) and candidate):
+                            continue
+                        state = ledger.pending_state(candidate)
+                        if state in ("pending", "unknown"):
+                            return refuse("mutation_pending_unknown", "%s:%s" % (candidate, state))
                 if ledger.seen(idem_key) is not None:
                     return refuse("replay_duplicate", idem_key)
                 if isinstance(request_id, str) and ledger.seen_request(request_id) is not None:

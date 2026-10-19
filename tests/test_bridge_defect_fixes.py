@@ -462,3 +462,164 @@ class PersistenceFailureTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CrashRecoveryV2Tests(unittest.TestCase):
+    """Phase 2: durable PENDING/CONFIRMED/FAILED/UNKNOWN, reconciliation, no auto-retry.
+
+    Every case reuses the SAME envelope object (the earlier attempt's oracle built a new
+    envelope per call, which is why it reported a mutation while a claim was pending).
+    A spy on ``gbp.bridge.live_queue.evaluate_live_queue`` proves the real gate path runs.
+    """
+
+    def setUp(self):
+        self.claims = tempfile.mkdtemp()
+        self.activation = write_activation()
+        self.addCleanup(os.unlink, self.activation)
+        self.calls = []
+
+    def _snapshot(self):
+        return LedgerSnapshot(claims_dir=self.claims)
+
+    def _submit(self, snapshot, gh, payload):
+        """Run the REAL path: live_gate_factory -> evaluate_live_queue -> mutation."""
+        from unittest import mock
+        from gbp.bridge import live_queue as lq
+        from gbp.bridge.executor import CommandExecutor
+
+        original = lq.evaluate_live_queue
+
+        def spying(**kwargs):
+            self.calls.append(kwargs.get("validated", {}).get("request_id"))
+            return original(**kwargs)
+
+        gate = live_gate_factory(gh, "tok", REPO, processed={}, ledger=snapshot,
+                                 budget_guard=lambda op, i=None: {"allowed": True},
+                                 activation_path=self.activation)
+        validated = validate_command(payload, now=time.time(), ledger=CommandLedger(),
+                                     budget_guard=lambda op, i=None: {"allowed": True},
+                                     live_queue_allowed=True)
+        executor = CommandExecutor(trace_path=tempfile.mktemp(), live_gate=gate)
+        with mock.patch.object(lq, "evaluate_live_queue", spying):
+            return executor.execute(validated, trusted())
+
+    def test_oracle_uses_the_real_gate_path(self):
+        snapshot, gh, payload = self._snapshot(), FakeGitHub(), envelope()
+        execution = self._submit(snapshot, gh, payload)
+        self.assertEqual(self.calls, [payload["request_id"]])      # the real gate really ran
+        self.assertTrue(execution["result"]["mutated"])
+        self.assertEqual(len(gh.label_posts), 1)
+        self.assertEqual(snapshot.pending_state(payload["idempotency_key"]), "pending")
+
+    def test_pending_is_refused_without_any_post(self):
+        snapshot, gh, payload = self._snapshot(), FakeGitHub(), envelope()
+        self.assertTrue(snapshot.claim(payload["idempotency_key"], payload["request_id"]))
+        execution = self._submit(snapshot, gh, payload)            # the SAME command
+        self.assertIn("mutation_pending_unknown", json.dumps(execution))
+        self.assertEqual(gh.label_posts, [])
+        self.assertEqual(snapshot.pending_state(payload["idempotency_key"]), "pending")
+
+    def test_malformed_marker_is_unknown_and_kept(self):
+        snapshot, gh, payload = self._snapshot(), FakeGitHub(), envelope()
+        path = snapshot._claim_path(payload["idempotency_key"])
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write("{not json")
+        execution = self._submit(snapshot, gh, payload)
+        self.assertIn("mutation_pending_unknown", json.dumps(execution))
+        self.assertEqual(gh.label_posts, [])
+        self.assertTrue(os.path.exists(path), "a marker is never deleted automatically")
+        self.assertEqual(snapshot.pending_state(payload["idempotency_key"]), "unknown")
+
+    def test_label_present_confirms_and_a_replay_is_refused(self):
+        snapshot, gh, payload = self._snapshot(), FakeGitHub(), envelope()
+        snapshot.claim(payload["idempotency_key"], payload["request_id"])
+        decision = snapshot.reconcile(payload["idempotency_key"], label_present=True)
+        self.assertEqual(decision["state"], "confirmed")
+        self.assertTrue(decision["attribution_uncertain"])
+        execution = self._submit(snapshot, gh, payload)
+        self.assertIn("replay_duplicate", json.dumps(execution))
+        self.assertEqual(gh.label_posts, [])
+
+    def test_label_absent_is_unknown_not_failed_even_when_old(self):
+        snapshot, payload = self._snapshot(), envelope()
+        snapshot.claim(payload["idempotency_key"], payload["request_id"])
+        decision = snapshot.reconcile(payload["idempotency_key"], label_present=False,
+                                      now=time.time() + 10 * 86400)
+        self.assertEqual(decision["state"], "unknown")
+        self.assertTrue(decision["requires_manual_review"])
+        gh = FakeGitHub()
+        self.assertIn("mutation_pending_unknown", json.dumps(self._submit(snapshot, gh, payload)))
+        self.assertEqual(gh.label_posts, [])
+
+    def test_api_unavailable_keeps_unknown_and_manual_review(self):
+        snapshot, payload = self._snapshot(), envelope()
+        snapshot.claim(payload["idempotency_key"], payload["request_id"])
+        decision = snapshot.reconcile(payload["idempotency_key"], label_present=None, api_error=True)
+        self.assertEqual(decision["state"], "unknown")
+        self.assertTrue(decision["requires_manual_review"])
+        self.assertEqual(snapshot.pending_state(payload["idempotency_key"]), "unknown")
+
+    def test_authoritative_failure_settles_failed_and_a_new_command_succeeds(self):
+        snapshot, gh, old = self._snapshot(), FakeGitHub(), envelope()
+        snapshot.claim(old["idempotency_key"], old["request_id"])
+        decision = snapshot.reconcile(old["idempotency_key"], label_present=False,
+                                      authoritative_failure=True)
+        self.assertEqual(decision["state"], "failed")
+        fresh = envelope()
+        execution = self._submit(snapshot, gh, fresh)
+        self.assertTrue(execution["result"]["mutated"])
+        self.assertEqual(len(gh.label_posts), 1)
+
+    def test_state_survives_a_restart(self):
+        payload = envelope()
+        first = self._snapshot()
+        first.claim(payload["idempotency_key"], payload["request_id"])
+        first.settle(payload["idempotency_key"], payload["request_id"], "confirmed", "label_confirmed")
+        restarted = self._snapshot()                     # a brand-new reader of the same dir
+        self.assertEqual(restarted.pending_state(payload["idempotency_key"]), "confirmed")
+        gh = FakeGitHub()
+        self.assertIn("replay_duplicate", json.dumps(self._submit(restarted, gh, payload)))
+        self.assertEqual(gh.label_posts, [])
+
+    def test_stale_pending_is_still_refused(self):
+        snapshot, gh, payload = self._snapshot(), FakeGitHub(), envelope()
+        snapshot.claim(payload["idempotency_key"], payload["request_id"])
+        path = snapshot._claim_path(payload["idempotency_key"])
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump({"state": "pending", "value": payload["idempotency_key"], "created_at": 1}, handle)
+        self.assertIn("mutation_pending_unknown", json.dumps(self._submit(snapshot, gh, payload)))
+        self.assertEqual(gh.label_posts, [])             # age never triggers an automatic retry
+
+    def test_transport_failure_settles_unknown_by_the_runner(self):
+        snapshot, payload = self._snapshot(), envelope()
+        snapshot.claim(payload["idempotency_key"], payload["request_id"])
+        from bridge_commands import _settle_ledger_for_execution
+        state = _settle_ledger_for_execution(snapshot, payload, {
+            "result": {"mutated": False,
+                       "mutation": {"attempted": True, "mutated": False,
+                                    "error": "mutation_transport_error: 502"}}})
+        self.assertEqual(state, "unknown")
+
+    def test_settle_does_not_wait_on_the_ledger_lock(self):
+        import fcntl
+        work = tempfile.mkdtemp()
+        ledger = os.path.join(work, "command-ledger.json")
+        snapshot = LedgerSnapshot(claims_dir=os.path.join(work, "claims"))
+        snapshot.claim("idem-lock", "req-lock")
+        with open(ledger + ".lock", "a+", encoding="utf-8") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            snapshot.settle("idem-lock", "req-lock", "confirmed", "test")   # must not block
+            fcntl.flock(lock, fcntl.LOCK_UN)
+        self.assertEqual(snapshot.pending_state("idem-lock"), "confirmed")
+
+    def test_concurrent_claims_have_exactly_one_winner(self):
+        payload = envelope()
+        first, second = self._snapshot(), self._snapshot()
+        results = [first.claim(payload["idempotency_key"], payload["request_id"]),
+                   second.claim(payload["idempotency_key"], payload["request_id"])]
+        self.assertEqual(sorted(results), [False, True])
+
+
+if __name__ == "__main__":
+    unittest.main()
