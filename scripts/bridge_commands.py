@@ -109,6 +109,47 @@ def find_open_pr_for_issue(request: Callable[..., Any], token: str, repo: str, n
 _ACTIVATION_IN_USE: Dict[str, Any] = {"path": None}
 
 
+class LedgerSnapshot:
+    """Replay view for the activation gate: entries that existed BEFORE this run.
+
+    The envelope validator records an accepted command in the live ledger. If the gate
+    then consulted that same ledger it would see the key the validator had just written
+    and refuse every command as ``replay_duplicate`` -- the production defect that made a
+    live ``queue_issue`` impossible. This snapshot is seeded from the persisted ledger at
+    process start and is updated only *after* a command completes, so:
+      * the current command is never refused by its own bookkeeping;
+      * a genuine replay (same idempotency key in an earlier run, or a second command in
+        this run) is still refused, including after a restart.
+    """
+
+    def __init__(self, keys: Optional[List[str]] = None,
+                 requests: Optional[List[str]] = None) -> None:
+        self._keys = set(keys or ())
+        self._requests = set(requests or ())
+
+    @classmethod
+    def from_file(cls, path: str) -> "LedgerSnapshot":
+        data = _load_json(path)
+        return cls(data.get("keys"), data.get("requests"))
+
+    def record(self, idempotency_key: Any, request_id: Any) -> None:
+        for value, target in ((idempotency_key, self._keys), (request_id, self._requests)):
+            if isinstance(value, str) and value:
+                target.add(value)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {"keys": sorted(self._keys), "requests": sorted(self._requests)}
+
+    def seen(self, key: Any):
+        return key if isinstance(key, str) and key in self._keys else None
+
+    def seen_request(self, request_id: Any):
+        return request_id if isinstance(request_id, str) and request_id in self._requests else None
+
+
+_PRE_VALIDATION_LEDGER = LedgerSnapshot()
+
+
 def activation_allows_live_queue(activation_path: Optional[str] = None) -> bool:
     """True only when the owner activation record for live queue_issue is valid.
 
@@ -251,6 +292,10 @@ def process_comment(
         request("POST", "/repos/%s/issues/%d/comments" % (repo, comment["_issue"]), token,
                 body={"body": executor.result_text(execution["state"], validated, execution["result"])})
     ledger.record(envelope, validated.get("idempotency_key") or envelope.get("idempotency_key"), now=now)
+    # Only now does the gate's snapshot learn this key: the current command has finished,
+    # so a later command with the same idempotency key is a genuine replay and is refused
+    # (this is what makes duplicate rejection survive a restart, since the snapshot is persisted).
+    _PRE_VALIDATION_LEDGER.record(envelope.get("idempotency_key"), envelope.get("request_id"))
     processed[cid] = {"state": execution["state"], "request_id": validated.get("request_id"),
                       "at": now}
     out.update(action="executed", execution=execution)
@@ -320,12 +365,16 @@ def main(argv=None, request: Optional[Callable[..., Any]] = None,
             return {"allowed": True, "reason": "guard unavailable: %s" % type(exc).__name__}
 
     ledger = CommandLedger()
+    # Seeded before any validation: the gate must not see keys the validator writes.
+    global _PRE_VALIDATION_LEDGER
+    _PRE_VALIDATION_LEDGER = LedgerSnapshot.from_file(LEDGER_PATH)
     processed = _load_json(PROCESSED_PATH)
 
     executor = CommandExecutor(status_document=live_status_document,
                               issue_inspector=issue_inspector_factory(request, token, args.repo),
                               live_gate=live_gate_factory(request, token, args.repo,
-                                                          processed=processed, ledger=ledger,
+                                                          processed=processed,
+                                                          ledger=_PRE_VALIDATION_LEDGER,
                                                           budget_guard=budget_guard,
                                                           activation_path=args.activation or None))
 
@@ -356,6 +405,7 @@ def main(argv=None, request: Optional[Callable[..., Any]] = None,
 
     if not args.no_post:
         _save_json(PROCESSED_PATH, processed)
+        _save_json(LEDGER_PATH, _PRE_VALIDATION_LEDGER.to_dict())
     print(json.dumps(results, indent=2, sort_keys=True) if args.json
           else "bridge: %s" % json.dumps(results, sort_keys=True)[:600])
     return 0

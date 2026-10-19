@@ -38,10 +38,17 @@ def newest_status_document(
     repo: str,
     issue_number: int,
 ) -> Optional[Dict[str, Any]]:
-    """Return the parsed JSON from the most recent status comment, or None."""
+    """Return the parsed JSON from the most recent status comment, or None.
+
+    GitHub returns comments oldest-first by default, so reading page 1 of a long status
+    issue used to return *ancient* documents and made the watchdog report a false
+    ``status_stale`` once the issue passed 100 comments. We now ask the API for
+    newest-first ordering and take the first parsable status document.
+    """
     comments, _ = request(
-        "GET", "/repos/%s/issues/%d/comments?per_page=100" % (repo, int(issue_number)), token)
-    for comment in reversed(comments or []):
+        "GET", "/repos/%s/issues/%d/comments?per_page=100&sort=created&direction=desc"
+        % (repo, int(issue_number)), token)
+    for comment in comments or []:
         body = str(comment.get("body") or "")
         if "```json" not in body:
             continue
