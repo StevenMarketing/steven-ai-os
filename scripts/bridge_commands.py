@@ -175,105 +175,22 @@ class LedgerSnapshot:
             os.makedirs(self.claims_dir, mode=0o700, exist_ok=True)
         except OSError:
             return False
-        created = []
         for value in (idempotency_key, request_id):
             if not (isinstance(value, str) and value):
                 continue
-            if value in self._keys or value in self._requests:
+            if value in self._keys or (value in self._requests):
                 continue
             path = self._claim_path(value)
             try:
                 handle = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
             except FileExistsError:
-                self._rollback(created)
                 return False
             except OSError:
-                self._rollback(created)
                 return False
             with os.fdopen(handle, "w", encoding="utf-8") as stream:
-                json.dump({"state": "pending", "value": value,
-                           "created_at": int(time.time())}, stream)
-            created.append(path)
+                stream.write("claimed\n")
         self.record(idempotency_key, request_id)
         return True
-
-    @staticmethod
-    def _rollback(paths: List[str]) -> None:
-        """Undo a partially created claim: all-or-nothing, so no half-claimed residue."""
-        for path in paths:
-            try:
-                os.unlink(path)
-            except OSError:
-                pass
-
-    def pending_state(self, value: Any) -> Optional[str]:
-        """``pending`` / ``confirmed`` / ``failed`` for a claimed identifier, else None.
-
-        A crash between claiming and mutating leaves ``pending``: the gate must report that
-        as an unknown outcome, never as a confirmed failure and never as retryable.
-        """
-        if not isinstance(value, str) or not value:
-            return None
-        try:
-            with open(self._claim_path(value), "r", encoding="utf-8") as stream:
-                return str(json.load(stream).get("state") or "pending")
-        except FileNotFoundError:
-            return None
-        except Exception:
-            return "pending"
-
-    def settle(self, idempotency_key: Any, request_id: Any, state: str) -> None:
-        """Record the final outcome of a claimed command (``confirmed`` / ``failed``)."""
-        for value in (idempotency_key, request_id):
-            if not (isinstance(value, str) and value):
-                continue
-            path = self._claim_path(value)
-            if not os.path.exists(path):
-                continue
-            atomic_write = path + ".settle-%d" % os.getpid()
-            try:
-                with open(atomic_write, "w", encoding="utf-8") as stream:
-                    json.dump({"state": state, "value": value,
-                               "settled_at": int(time.time())}, stream)
-                os.replace(atomic_write, path)
-            except OSError:
-                pass
-        self.record(idempotency_key, request_id)
-
-    def merge(self, keys: Any = None, requests: Any = None) -> None:
-        """Union in identifiers discovered in a concurrently written file."""
-        self._keys |= set(keys or ())
-        self._requests |= set(requests or ())
-
-    def save(self, path: Optional[str] = None) -> None:
-        """Merge into ``path`` under an exclusive lock instead of overwriting it.
-
-        Two runners persisting at the same time used to be a last-writer-wins overwrite,
-        which could drop the other process's identifiers and make them replayable after a
-        restart. The read-modify-write below is serialised by ``flock`` and published with
-        an atomic rename, so no recorded key or request id can be lost.
-        """
-        import fcntl
-        target = path or LEDGER_PATH
-        directory = os.path.dirname(os.path.abspath(target))
-        try:
-            os.makedirs(directory, mode=0o700, exist_ok=True)
-        except OSError:
-            return
-        try:
-            with open(target + ".lock", "a+", encoding="utf-8") as lock:
-                fcntl.flock(lock, fcntl.LOCK_EX)
-                try:
-                    stored = _load_json(target) or {}
-                    self.merge(stored.get("keys"), stored.get("requests"))
-                    temporary = "%s.tmp-%d" % (target, os.getpid())
-                    with open(temporary, "w", encoding="utf-8") as stream:
-                        json.dump(self.to_dict(), stream)
-                    os.replace(temporary, target)
-                finally:
-                    fcntl.flock(lock, fcntl.LOCK_UN)
-        except OSError:
-            pass
 
 
 _PRE_VALIDATION_LEDGER = LedgerSnapshot()
@@ -424,9 +341,7 @@ def process_comment(
     # Only now does the gate's snapshot learn this key: the current command has finished,
     # so a later command with the same idempotency key is a genuine replay and is refused
     # (this is what makes duplicate rejection survive a restart, since the snapshot is persisted).
-    _PRE_VALIDATION_LEDGER.settle(
-        envelope.get("idempotency_key"), envelope.get("request_id"),
-        "confirmed" if (execution.get("result") or {}).get("mutated") else "failed")
+    _PRE_VALIDATION_LEDGER.record(envelope.get("idempotency_key"), envelope.get("request_id"))
     processed[cid] = {"state": execution["state"], "request_id": validated.get("request_id"),
                       "at": now}
     out.update(action="executed", execution=execution)
@@ -536,7 +451,7 @@ def main(argv=None, request: Optional[Callable[..., Any]] = None,
 
     if not args.no_post:
         _save_json(PROCESSED_PATH, processed)
-        _PRE_VALIDATION_LEDGER.save(LEDGER_PATH)
+        _save_json(LEDGER_PATH, _PRE_VALIDATION_LEDGER.to_dict())
     print(json.dumps(results, indent=2, sort_keys=True) if args.json
           else "bridge: %s" % json.dumps(results, sort_keys=True)[:600])
     return 0
