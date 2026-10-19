@@ -263,6 +263,13 @@ def evaluate_live_queue(
                     return refuse("replay_duplicate", idem_key)
                 if isinstance(request_id, str) and ledger.seen_request(request_id) is not None:
                     return refuse("replay_duplicate", request_id)
+                # Cross-process safety: reserve the identifiers atomically (O_CREAT|O_EXCL).
+                # Two runner processes racing on the same command both see an empty ledger,
+                # so the check above alone is not enough; exactly one wins the claim and the
+                # other fails closed BEFORE any GitHub mutation. Ledgers without atomic
+                # claiming keep the previous behaviour.
+                if hasattr(ledger, "claim") and not ledger.claim(idem_key, request_id):
+                    return refuse("replay_duplicate", idem_key)
             except Exception:  # fail closed on a broken ledger
                 return refuse("ledger_error")
 

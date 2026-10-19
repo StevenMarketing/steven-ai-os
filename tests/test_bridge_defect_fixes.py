@@ -7,6 +7,7 @@ passed 100 comments it evaluated an ancient document and raised a false `status_
 """
 import json
 import os
+import sys
 import tempfile
 import time
 import unittest
@@ -160,15 +161,32 @@ class Defect2Tests(unittest.TestCase):
         self.assertEqual(found["generated_at"], "2026-10-19T16:08:00Z")
         self.assertTrue(any("direction=desc" in p for p in seen_paths))
 
-    def test_malformed_newest_falls_back_to_the_next_parsable(self):
-        comments = [{"body": "no fence here"}, {"body": "```json\n{bad json\n```"},
-                    {"body": self._status("2026-10-19T15:00:00Z")}]
+    def test_malformed_newest_reports_unreadable_with_an_older_healthy_document(self):
+        """The point of the fix: a broken newest status must ALERT, never fall back."""
+        healthy = self._status("2026-10-19T15:00:00Z")
+        page = [{"body": "```json\n{not json at all\n```"}, {"body": healthy}]
 
         def request(*a, **k):
-            return (comments, {})
+            return (page, {})
 
-        self.assertEqual(newest_status_document(request, "tok", REPO, 46)["generated_at"],
-                         "2026-10-19T15:00:00Z")
+        found = newest_status_document(request, "tok", REPO, 46)
+        self.assertIsNotNone(found)
+        self.assertEqual(found.get("reason"), "malformed_newest_status")
+        self.assertIsNone(found.get("generated_at"))
+        out = evaluate_external(found, now=time.time())
+        self.assertFalse(out["ok"])
+        self.assertIn("status_unreadable", [a["code"] for a in out["alerts"]])
+
+    def test_newest_without_a_timestamp_is_unreadable_not_a_fallback(self):
+        page = [{"body": '```json\n{"worker": {"state": "idle"}}\n```'},
+                {"body": self._status("2026-10-19T15:00:00Z")}]
+
+        def request(*a, **k):
+            return (page, {})
+
+        found = newest_status_document(request, "tok", REPO, 46)
+        self.assertEqual(found.get("reason"), "newest_status_without_timestamp")
+        self.assertFalse(evaluate_external(found, now=time.time())["ok"])
 
     def test_api_failure_is_not_hidden(self):
         def request(*a, **k):
@@ -199,3 +217,100 @@ class Defect2Tests(unittest.TestCase):
 if __name__ == "__main__":
     unittest.main()
 
+
+
+class CrossProcessReplayTests(unittest.TestCase):
+    """Two REAL runner processes racing on one command: exactly one admits the mutation."""
+
+    CHILD = r"""
+import json, os, sys, time
+ROOT = os.environ["FIX2ROOT"]
+sys.path.insert(0, os.path.join(ROOT, "src")); sys.path.insert(0, os.path.join(ROOT, "scripts"))
+while not os.path.exists(os.environ["GOFILE"]):
+    time.sleep(0.005)
+from gbp.bridge.commands import CommandLedger, validate_command
+from gbp.bridge.identity import TrustedContext
+from bridge_commands import LedgerSnapshot, live_gate_factory
+
+REPO = "StevenMarketing/steven-ai-os"; OWNER = "StevenMarketing"
+HEADINGS = "## Goal\nx\n## Scope\nx\n## Acceptance Criteria\nx\n## Tests Required\nx\n## Constraints\nx\n"
+
+
+class GH:
+    def __init__(self):
+        self.label_posts = []
+
+    def __call__(self, method, path, token=None, body=None):
+        if method == "POST" and path.endswith("/labels"):
+            self.label_posts.append(body); return ({"labels": [{"name": "hermes-ready"}]}, {})
+        if "/collaborators/" in path: return ({"permission": "admin"}, {})
+        if "/issues/comments/" in path: return ({"user": {"login": OWNER}, "author_association": "OWNER"}, {})
+        if "/labels" in path: return ([{"name": "hermes-ready"}], {})
+        if "/issues/57" in path: return ({"number": 57, "state": "open", "body": HEADINGS, "labels": []}, {})
+        return ([], {})
+
+
+env = json.loads(os.environ["ENVELOPE"])
+gh = GH()
+validated = validate_command(env, now=time.time(), ledger=CommandLedger(),
+                             budget_guard=lambda op, i=None: {"allowed": True},
+                             live_queue_allowed=True)
+gate = live_gate_factory(gh, "tok", REPO, processed={}, ledger=LedgerSnapshot(),
+                         budget_guard=lambda op, i=None: {"allowed": True},
+                         activation_path=os.environ["ACTIVATION"])
+try:
+    receipt = gate(validated, TrustedContext(REPO, "issue_comment", 1, OWNER, "OWNER", "admin",
+                                             "issue_comment", True))
+except Exception as exc:                      # a refusal may surface as an exception
+    receipt = {"result": {"mutated": False, "reason": str(exc)[:120]}}
+blob = json.dumps(receipt)
+print(json.dumps({"accepted": bool(validated.get("accepted")) if isinstance(validated, dict) else None,
+                  "label_posts": len(gh.label_posts),
+                  "mutated": "\"mutated\": true" in blob.replace("True", "true"),
+                  "raw": blob[:200]}))
+"""
+
+    def test_two_processes_racing_on_the_same_command_mutate_exactly_once(self):
+        import subprocess
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        claims = tempfile.mkdtemp()
+        go = os.path.join(claims, "go")
+        activation = write_activation()
+        self.addCleanup(os.unlink, activation)
+
+        child = tempfile.mktemp(suffix=".py")
+        with open(child, "w", encoding="utf-8") as handle:
+            handle.write(self.CHILD)
+
+        env = dict(os.environ)
+        env.update({"FIX2ROOT": root, "GOFILE": go, "ACTIVATION": activation,
+                    "STEVEN_BRIDGE_CLAIMS_DIR": claims,
+                    "PYTHONPATH": os.path.join(root, "src") + os.pathsep + os.path.join(root, "scripts")})
+        outs = []
+        procs = []
+        for _ in range(2):
+            payload = envelope()
+            env["ENVELOPE"] = json.dumps(payload)
+            procs.append(subprocess.Popen([sys.executable, child], env=env,
+                                          stdout=subprocess.PIPE, stderr=subprocess.PIPE))
+        time.sleep(0.2)
+        open(go, "w").close()                      # release both processes together
+        for proc in procs:
+            out, err = proc.communicate(timeout=90)
+            outs.append((out.decode() or err.decode())[-300:])
+
+        parsed = []
+        for text in outs:
+            try:
+                parsed.append(json.loads(text.strip().splitlines()[-1]))
+            except Exception:
+                parsed.append({"mutated": False, "raw": text})
+        mutated = [p for p in parsed if p.get("mutated")]
+        posts = sum(int(p.get("label_posts") or 0) for p in parsed)
+        self.assertEqual(len(mutated), 1, parsed)          # exactly one winner
+        self.assertEqual(posts, 1, parsed)                 # exactly one label mutation
+        self.assertTrue(all(p.get("accepted") for p in parsed))   # both passed validation
+
+
+if __name__ == "__main__":
+    unittest.main()

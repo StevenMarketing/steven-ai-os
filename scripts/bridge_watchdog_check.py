@@ -51,7 +51,7 @@ def newest_status_document(
     comments, _ = request(
         "GET", "/repos/%s/issues/%d/comments?per_page=100&sort=created&direction=desc"
         % (repo, int(issue_number)), token)
-    return _pick_newest_document(_parsable_status_documents(comments or []))
+    return _pick_newest_document(comments or [])
 
 
 def _parsable_status_documents(comments: Any) -> List[Dict[str, Any]]:
@@ -71,8 +71,65 @@ def _parsable_status_documents(comments: Any) -> List[Dict[str, Any]]:
     return documents
 
 
-def _pick_newest_document(documents: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    """Newest by parseable ``generated_at``; last entry when none carries a timestamp."""
+def _unreadable(reason: str) -> Dict[str, Any]:
+    """A status document that must alert: never a silent fallback to an older document."""
+    return {"generated_at": None, "unreadable": True, "reason": reason,
+            "worker": {}, "cron": {}, "budget": {}}
+
+
+def _pick_newest_document(comments: Any) -> Optional[Dict[str, Any]]:
+    """Authoritative status document, failing closed when the newest one is unusable.
+
+    The page is requested newest-first, so the first fence-bearing comment is the newest
+    status. If that comment is malformed (or its document has no parsable ``generated_at``)
+    we return an *unreadable* document so the watchdog alerts -- we never quietly fall back
+    to an older, healthy-looking document, which would hide a broken publisher. Within the
+    page we still prefer the greatest parsable timestamp so a caller that hands us another
+    ordering stays correct, and a page with no status comment at all returns None.
+    """
+    candidates = []
+    for comment in comments or []:
+        body = str(comment.get("body") or "")
+        if "```json" not in body:
+            continue
+        try:
+            parsed = json.loads(body.split("```json", 1)[1].split("```", 1)[0])
+        except Exception:
+            parsed = None
+        candidates.append(parsed if isinstance(parsed, dict) else None)
+    if not candidates:
+        return None
+    newest = candidates[0]
+    if newest is None:
+        return _unreadable("malformed_newest_status")
+    documents = [d for d in candidates if d is not None]
+    stamped = []
+    for document in documents:
+        value = document.get("generated_at")
+        if not isinstance(value, str):
+            continue
+        try:
+            stamped.append((datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ"), document))
+        except ValueError:
+            continue
+    if stamped and len(stamped) == len(documents):
+        # every candidate is timed: prefer the greatest timestamp (tolerates another ordering)
+        picked = max(stamped, key=lambda item: item[0])[1]
+    else:
+        # the newest status comment decides -- never a silent fallback to an older document
+        picked = newest
+    value = picked.get("generated_at")
+    if not isinstance(value, str):
+        return _unreadable("newest_status_without_timestamp")
+    try:
+        datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ")
+    except ValueError:
+        return _unreadable("newest_status_unparsable_timestamp")
+    return picked
+
+
+def _legacy_pick_newest_document(documents: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Kept for callers/tests that pass an already-parsed list."""
     if not documents:
         return None
     stamped = []

@@ -18,6 +18,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import sys
@@ -122,10 +123,16 @@ class LedgerSnapshot:
         this run) is still refused, including after a restart.
     """
 
+    CLAIMS_DIR = os.environ.get("STEVEN_BRIDGE_CLAIMS_DIR") or os.path.join(
+        os.path.dirname(os.path.abspath(LEDGER_PATH)), "ledger-claims")
+
     def __init__(self, keys: Optional[List[str]] = None,
-                 requests: Optional[List[str]] = None) -> None:
+                 requests: Optional[List[str]] = None,
+                 claims_dir: Optional[str] = None) -> None:
         self._keys = set(keys or ())
         self._requests = set(requests or ())
+        self.claims_dir = claims_dir or (os.environ.get("STEVEN_BRIDGE_CLAIMS_DIR")
+                                         or self.CLAIMS_DIR)
 
     @classmethod
     def from_file(cls, path: str) -> "LedgerSnapshot":
@@ -141,10 +148,49 @@ class LedgerSnapshot:
         return {"keys": sorted(self._keys), "requests": sorted(self._requests)}
 
     def seen(self, key: Any):
-        return key if isinstance(key, str) and key in self._keys else None
+        if not isinstance(key, str):
+            return None
+        if key in self._keys or os.path.exists(self._claim_path(key)):
+            return key
+        return None
 
     def seen_request(self, request_id: Any):
-        return request_id if isinstance(request_id, str) and request_id in self._requests else None
+        if not isinstance(request_id, str):
+            return None
+        if request_id in self._requests or os.path.exists(self._claim_path(request_id)):
+            return request_id
+        return None
+
+    def _claim_path(self, value: str) -> str:
+        digest = hashlib.sha256(value.encode("utf-8")).hexdigest()[:32]
+        return os.path.join(self.claims_dir, digest + ".claim")
+
+    def claim(self, idempotency_key: Any = None, request_id: Any = None) -> bool:
+        """Atomically reserve the identifiers; False means someone else already holds them.
+
+        ``O_CREAT|O_EXCL`` makes the reservation atomic across processes, so two runners
+        that race on the same command cannot both mutate. Any error fails closed.
+        """
+        try:
+            os.makedirs(self.claims_dir, mode=0o700, exist_ok=True)
+        except OSError:
+            return False
+        for value in (idempotency_key, request_id):
+            if not (isinstance(value, str) and value):
+                continue
+            if value in self._keys or (value in self._requests):
+                continue
+            path = self._claim_path(value)
+            try:
+                handle = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            except FileExistsError:
+                return False
+            except OSError:
+                return False
+            with os.fdopen(handle, "w", encoding="utf-8") as stream:
+                stream.write("claimed\n")
+        self.record(idempotency_key, request_id)
+        return True
 
 
 _PRE_VALIDATION_LEDGER = LedgerSnapshot()
