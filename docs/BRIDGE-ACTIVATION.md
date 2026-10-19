@@ -279,3 +279,4 @@ Everything outside `queue_issue` is unchanged: no shell, no protected-file write
 budget/security/credential/OAuth changes, no public ports, no live Google actions, no
 deploy, no merge/approve. `pause_queue` / `resume_queue` / `retry_failed_issue` remain
 Phase-1 blocked.
+* Activation record — Issue #55: second harmless live `queue_issue` test activated on the owner-approved window (docs-only line; no code, config or protected path changed).
