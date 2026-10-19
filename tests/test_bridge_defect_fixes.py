@@ -5,12 +5,22 @@ gate then saw that same entry and refused every live command as `replay_duplicat
 DEFECT 2: the watchdog read page 1 of the status issue (oldest-first), so once the issue
 passed 100 comments it evaluated an ancient document and raised a false `status_stale`.
 """
+import os as _os
+import tempfile as _tempfile
+
+# Test hygiene: keep every claim in this file inside its own claims directory,
+# set BEFORE bridge_commands is imported (the class attribute reads it at import).
+# Without this the tests share the real ops/bridge/ledger-claims path and a claim
+# left by one test refuses a later test's first-time admission.
+_os.environ["STEVEN_BRIDGE_CLAIMS_DIR"] = _tempfile.mkdtemp(prefix="bridge-claims-")
+
 import json
 import os
 import sys
 import tempfile
 import time
 import unittest
+import uuid
 
 from gbp.bridge.commands import CommandLedger, validate_command
 from gbp.bridge.executor import CommandExecutor
@@ -60,8 +70,9 @@ class FakeGitHub:
 
 def envelope():
     now = time.time()
-    return {"operation": "queue_issue", "issue": 57, "request_id": "req-%d" % int(now * 1e3),
-            "idempotency_key": "idem-%d" % int(now * 1e3), "actor": OWNER, "origin": REPO,
+    unique = uuid.uuid4().hex[:10]          # unique per call: tests cannot collide on a key
+    return {"operation": "queue_issue", "issue": 57, "request_id": "req-%s" % unique,
+            "idempotency_key": "idem-%s" % unique, "actor": OWNER, "origin": REPO,
             "created_at": now, "ttl_seconds": 900, "dry_run": False}
 
 
@@ -419,6 +430,34 @@ print("saved")
         restored = LedgerSnapshot.from_file(ledger)
         for value in ("idem-a", "req-a", "idem-b", "req-b"):
             self.assertEqual(restored.seen(value) or restored.seen_request(value), value)
+
+
+if __name__ == "__main__":
+    unittest.main()
+
+
+class PersistenceFailureTests(unittest.TestCase):
+    """Phase 1.5: a failed save must be visible and must never be swallowed."""
+
+    def test_unwritable_ledger_raises_instead_of_silently_dropping_state(self):
+        from bridge_commands import LedgerPersistenceError
+        work = tempfile.mkdtemp()
+        blocker = os.path.join(work, "not-a-directory")
+        with open(blocker, "w", encoding="utf-8") as handle:
+            handle.write("x")
+        snapshot = LedgerSnapshot(claims_dir=os.path.join(work, "claims"))
+        snapshot.claim("idem-p", "req-p")
+        with self.assertRaises(LedgerPersistenceError):
+            snapshot.save(os.path.join(blocker, "command-ledger.json"))
+
+    def test_successful_save_is_durable_for_the_next_reader(self):
+        work = tempfile.mkdtemp()
+        ledger = os.path.join(work, "command-ledger.json")
+        snapshot = LedgerSnapshot(claims_dir=os.path.join(work, "claims"))
+        snapshot.claim("idem-d", "req-d")
+        snapshot.save(ledger)
+        restored = LedgerSnapshot.from_file(ledger)
+        self.assertEqual(restored.seen("idem-d"), "idem-d")
 
 
 if __name__ == "__main__":

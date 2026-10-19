@@ -110,6 +110,10 @@ def find_open_pr_for_issue(request: Callable[..., Any], token: str, repo: str, n
 _ACTIVATION_IN_USE: Dict[str, Any] = {"path": None}
 
 
+class LedgerPersistenceError(RuntimeError):
+    """Raised when the ledger cannot be persisted: the caller must fail closed."""
+
+
 class LedgerSnapshot:
     """Replay view for the activation gate: entries that existed BEFORE this run.
 
@@ -151,8 +155,9 @@ class LedgerSnapshot:
         target = path or LEDGER_PATH
         try:
             os.makedirs(os.path.dirname(os.path.abspath(target)), mode=0o700, exist_ok=True)
-        except OSError:
-            return
+        except OSError as exc:
+            raise LedgerPersistenceError("cannot create the ledger directory for %s: %s"
+                                         % (target, exc)) from exc
         try:
             with open(target + ".lock", "a+", encoding="utf-8") as lock:
                 fcntl.flock(lock, fcntl.LOCK_EX)
@@ -162,11 +167,16 @@ class LedgerSnapshot:
                     temporary = "%s.tmp-%d" % (target, os.getpid())
                     with open(temporary, "w", encoding="utf-8") as stream:
                         json.dump(self.to_dict(), stream)
+                        stream.flush()
+                        os.fsync(stream.fileno())
                     os.replace(temporary, target)
                 finally:
                     fcntl.flock(lock, fcntl.LOCK_UN)
-        except OSError:
-            pass
+        except OSError as exc:
+            # Never swallow this: a silently failed save would make a recorded command
+            # replayable after a restart. The error is visible and the caller fails closed.
+            raise LedgerPersistenceError(
+                "ledger persistence FAILED for %s: %s" % (target, exc)) from exc
 
     @classmethod
     def from_file(cls, path: str) -> "LedgerSnapshot":
@@ -503,7 +513,11 @@ def main(argv=None, request: Optional[Callable[..., Any]] = None,
 
     if not args.no_post:
         _save_json(PROCESSED_PATH, processed)
-        _PRE_VALIDATION_LEDGER.save(LEDGER_PATH)
+        try:
+            _PRE_VALIDATION_LEDGER.save(LEDGER_PATH)
+        except LedgerPersistenceError as exc:
+            print("FAIL-CLOSED: %s" % exc, file=sys.stderr)
+            raise SystemExit(3)
     print(json.dumps(results, indent=2, sort_keys=True) if args.json
           else "bridge: %s" % json.dumps(results, sort_keys=True)[:600])
     return 0
