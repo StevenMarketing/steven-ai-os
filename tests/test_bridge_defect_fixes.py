@@ -286,11 +286,13 @@ print(json.dumps({"accepted": bool(validated.get("accepted")) if isinstance(vali
         env.update({"FIX2ROOT": root, "GOFILE": go, "ACTIVATION": activation,
                     "STEVEN_BRIDGE_CLAIMS_DIR": claims,
                     "PYTHONPATH": os.path.join(root, "src") + os.pathsep + os.path.join(root, "scripts")})
+        # ONE envelope shared by both processes: same idempotency key and request id,
+        # which is the only construction the race is about.
+        shared = json.dumps(envelope())
         outs = []
         procs = []
         for _ in range(2):
-            payload = envelope()
-            env["ENVELOPE"] = json.dumps(payload)
+            env["ENVELOPE"] = shared
             procs.append(subprocess.Popen([sys.executable, child], env=env,
                                           stdout=subprocess.PIPE, stderr=subprocess.PIPE))
         time.sleep(0.2)
