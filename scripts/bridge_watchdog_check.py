@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from datetime import datetime
 import os
 import sys
 import time
@@ -40,27 +41,52 @@ def newest_status_document(
 ) -> Optional[Dict[str, Any]]:
     """Return the parsed JSON from the most recent status comment, or None.
 
-    GitHub returns comments oldest-first by default, so reading page 1 of a long status
-    issue used to return *ancient* documents and made the watchdog report a false
-    ``status_stale`` once the issue passed 100 comments. We now ask the API for
-    newest-first ordering and take the first parsable status document.
+    GitHub returns issue comments oldest-first unless asked otherwise, so reading page 1
+    used to return *ancient* documents and made the watchdog report a false
+    ``status_stale`` once the status issue passed 100 comments. We now ask for
+    newest-first ordering and, to stay correct even if a caller hands us another
+    ordering, prefer the document with the greatest parsable timestamp, falling back to
+    the last entry when no document carries one (the legacy behaviour).
     """
     comments, _ = request(
         "GET", "/repos/%s/issues/%d/comments?per_page=100&sort=created&direction=desc"
         % (repo, int(issue_number)), token)
+    return _pick_newest_document(_parsable_status_documents(comments or []))
+
+
+def _parsable_status_documents(comments: Any) -> List[Dict[str, Any]]:
+    """Every comment body that carries a parsable ``json`` status document, in page order."""
+    documents = []
     for comment in comments or []:
         body = str(comment.get("body") or "")
         if "```json" not in body:
             continue
         try:
             payload = body.split("```json", 1)[1].split("```", 1)[0]
-            document = json.loads(payload)
+            parsed = json.loads(payload)
         except Exception:
             continue
-        if isinstance(document, dict):
-            return document
-    return None
+        if isinstance(parsed, dict):
+            documents.append(parsed)
+    return documents
 
+
+def _pick_newest_document(documents: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Newest by parseable ``generated_at``; last entry when none carries a timestamp."""
+    if not documents:
+        return None
+    stamped = []
+    for document in documents:
+        value = document.get("generated_at")
+        if not isinstance(value, str):
+            continue
+        try:
+            stamped.append((datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ"), document))
+        except ValueError:
+            continue
+    if stamped:
+        return max(stamped, key=lambda item: item[0])[1]
+    return documents[-1]
 
 def collect_and_evaluate(
     request: Callable[..., Any],

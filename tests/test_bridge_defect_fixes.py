@@ -198,3 +198,15 @@ class Defect2Tests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LegacyOrderingStubTests(unittest.TestCase):
+    """A page handed back in list order with no timestamps keeps the legacy last-wins pick."""
+
+    def test_untimestamped_page_still_returns_the_last_document(self):
+        from bridge_watchdog_check import newest_status_document
+
+        def request(*a, **k):
+            return ([{"worker": {"state": "older"}}, {"worker": {"state": "idle"}}], {})
+
+        self.assertEqual(newest_status_document(request, "t", REPO, 46)["worker"]["state"], "idle")
