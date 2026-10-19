@@ -110,9 +110,13 @@ class CommandExecutor:
                     "phase1_read_only: a live queue_issue is not authorized; send dry_run=true")
             receipt = self._live_gate(validated, trusted)
             admitted = bool((receipt or {}).get("admitted"))
+            # ``mutated`` is a claim about the real world: it is taken from the
+            # gate's receipt, which only sets it true after the label API
+            # confirmed the mutation (Issue #57). Admission alone never mutates.
+            mutated = bool((receipt or {}).get("mutated"))
             result = {"operation": "queue_issue", "dry_run": False, "issue": issue,
                       "would_queue": admitted, "admitted": admitted,
-                      "mutated": admitted, "receipt": receipt,
+                      "mutated": mutated, "receipt": receipt,
                       "reason": (receipt or {}).get("code")}
             if not admitted:
                 raise ExecutionError(

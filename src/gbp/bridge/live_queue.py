@@ -214,6 +214,7 @@ def evaluate_live_queue(
         "reasons": [],
         "links": {},
         "mutated": False,
+        "would_queue": False,
     }
 
     def refuse(code: str, detail: str = "") -> Dict[str, Any]:
@@ -283,10 +284,13 @@ def evaluate_live_queue(
         if str(number) in processed or number in processed:
             return refuse("already_processed", str(number))
         labels = _label_names(issue)
-        if "hermes-ready" not in labels:
-            return refuse("target_missing_ready_label")
         if "hermes-done" in labels or "hermes-blocked" in labels:
             return refuse("target_already_settled")
+        # Issue #57: the live mutation *is* the enqueue -- it adds ``hermes-ready``.
+        # A target that already carries the label is already queued, so a second
+        # command must never enqueue it twice.
+        if "hermes-ready" in labels:
+            return refuse("already_queued")
 
         verdict = preflight(issue.get("body") or "", patterns=_resolve_patterns(patterns))
         if verdict.get("tripwire"):
@@ -315,9 +319,12 @@ def evaluate_live_queue(
         if not allowed:
             return refuse("budget_blocked", reason)
 
+        # An admission is NOT a mutation: ``mutated`` stays false here and is set
+        # only by :mod:`gbp.bridge.live_mutation` after the label API confirms it.
         receipt["admitted"] = True
+        receipt["would_queue"] = True
         receipt["code"] = "admitted"
-        receipt["mutated"] = True
+        receipt["mutated"] = False
         return receipt
     except Exception:  # noqa: BLE001 - fail closed on ANY unexpected fault
         return refuse("gate_error")
@@ -325,8 +332,9 @@ def evaluate_live_queue(
 
 def render_receipt(receipt: Dict[str, Any], *, trusted: Optional[TrustedContext] = None) -> str:
     """GitHub-visible admission receipt (bounded, redacted, no free text)."""
+    state = "queued" if receipt.get("mutated") else ("admitted" if receipt.get("admitted") else "rejected")
     lines = [
-        "### Command result — `claimed -> %s`" % ("queued" if receipt.get("admitted") else "rejected"),
+        "### Command result — `claimed -> %s`" % state,
         "",
         "| field | value |",
         "|---|---|",
@@ -334,6 +342,7 @@ def render_receipt(receipt: Dict[str, Any], *, trusted: Optional[TrustedContext]
         "| operation | `%s` |" % receipt.get("operation"),
         "| issue | `%s` |" % (receipt.get("issue") if receipt.get("issue") is not None else "—"),
         "| admitted | `%s` |" % bool(receipt.get("admitted")),
+        "| mutated | `%s` |" % bool(receipt.get("mutated")),
         "| code | `%s` |" % receipt.get("code"),
     ]
     if trusted is not None:

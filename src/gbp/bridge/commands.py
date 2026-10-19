@@ -202,6 +202,7 @@ def validate_command(
     now: float,
     ledger: Optional[CommandLedger] = None,
     budget_guard: Optional[Callable[[str, Optional[int]], Any]] = None,
+    live_queue_allowed: bool = False,
 ) -> Dict[str, Any]:
     """Validate and authorize one envelope. Never raises for untrusted input.
 
@@ -282,8 +283,12 @@ def validate_command(
         if operation in ("queue_issue", "retry_failed_issue") and issue is None:
             _reject(errors, "issue_required", "issue")
         if operation not in READ_ONLY_OPERATIONS and raw.get("dry_run") is not True:
-            # Phase 1: mutating operations are accepted only as dry runs.
-            _reject(errors, "mutation_requires_dry_run", "dry_run")
+            # Phase 1: mutating operations are accepted only as dry runs -- unless the
+            # caller has independently verified the owner activation record for this
+            # operation. Even then only queue_issue is let through, and it still has to
+            # pass the activation gate inside the executor, which fails closed.
+            if not (live_queue_allowed and operation == "queue_issue"):
+                _reject(errors, "mutation_requires_dry_run", "dry_run")
 
         dry_run = raw.get("dry_run")
         if dry_run is not None and not isinstance(dry_run, bool):

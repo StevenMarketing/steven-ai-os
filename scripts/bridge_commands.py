@@ -105,6 +105,25 @@ def find_open_pr_for_issue(request: Callable[..., Any], token: str, repo: str, n
     return False
 
 
+#: Activation record in force for this process; main() sets it from --activation.
+_ACTIVATION_IN_USE: Dict[str, Any] = {"path": None}
+
+
+def activation_allows_live_queue(activation_path: Optional[str] = None) -> bool:
+    """True only when the owner activation record for live queue_issue is valid.
+
+    The validator needs this to let a ``dry_run: false`` queue_issue through to the
+    gate. Everything else stays refused, and the gate re-checks the whole envelope.
+    """
+    try:
+        import gbp.bridge.live_queue as lq
+
+        record = lq.load_activation(activation_path if activation_path else ACTIVATION_PATH)
+        return bool(lq.activation_status(record, now=time.time()).get("enabled"))
+    except Exception:
+        return False
+
+
 def live_gate_factory(
     request: Callable[..., Any],
     token: str,
@@ -121,6 +140,7 @@ def live_gate_factory(
     network call, so production behaviour is unchanged until the owner installs
     the record. Everything is delegated to :mod:`gbp.bridge.live_queue`.
     """
+    from gbp.bridge import live_mutation as lm
     from gbp.bridge import live_queue as lq
 
     def gate(validated: Dict[str, Any], trusted: Any) -> Dict[str, Any]:
@@ -144,9 +164,17 @@ def live_gate_factory(
         issue = {"number": payload.get("number"), "state": payload.get("state"),
                  "repository": repo, "labels": payload.get("labels"), "body": payload.get("body")}
         open_pr = find_open_pr_for_issue(request, token, repo, int(number))
-        return lq.evaluate_live_queue(validated=validated, trusted=trusted, activation=activation,
-                                      issue=issue, processed=processed, ledger=ledger,
-                                      budget_guard=budget_guard, open_pr=open_pr, now=now)
+        receipt = lq.evaluate_live_queue(validated=validated, trusted=trusted, activation=activation,
+                                         issue=issue, processed=processed, ledger=ledger,
+                                         budget_guard=budget_guard, open_pr=open_pr, now=now)
+        # Issue #57: an admission is not an enqueue. Perform the ONE approved
+        # GitHub mutation (add ``hermes-ready``) and let the receipt's ``mutated``
+        # reflect the confirmed API result -- never the mere admission decision.
+        if receipt.get("admitted"):
+            lm.apply_mutation_to_receipt(receipt, request=request, token=token, repo=repo,
+                                         number=int(number),
+                                         existing_labels=lm.label_names(issue.get("labels")))
+        return receipt
 
     return gate
 
@@ -195,7 +223,8 @@ def process_comment(
         processed[cid] = {"state": "rejected", "code": code, "at": now}
         return out
 
-    validated = validate_command(envelope, now=now, ledger=ledger, budget_guard=budget_guard)
+    validated = validate_command(envelope, now=now, ledger=ledger, budget_guard=budget_guard,
+                                     live_queue_allowed=activation_allows_live_queue(_ACTIVATION_IN_USE["path"]))
     out["validated"] = {k: validated.get(k) for k in ("accepted", "replay", "code", "operation")}
     if not validated.get("accepted"):
         out["action"] = "rejected"
@@ -268,6 +297,8 @@ def main(argv=None, request: Optional[Callable[..., Any]] = None,
     ap.add_argument("--activation", default="", help="path to the live queue_issue activation record (default OFF)")
     args = ap.parse_args(argv)
 
+    _ACTIVATION_IN_USE["path"] = args.activation or None
+
     import issue_github
 
     if request is None:
@@ -309,6 +340,7 @@ def main(argv=None, request: Optional[Callable[..., Any]] = None,
                     "trusted": getattr(trusted, "author_login", "")}]
         if ok:
             validated = validate_command(envelope, now=time.time(), ledger=ledger,
+                                         live_queue_allowed=activation_allows_live_queue(_ACTIVATION_IN_USE["path"]),
                                          budget_guard=budget_guard)
             results[0]["validated"] = {k: validated.get(k) for k in ("accepted", "code", "replay")}
             if validated.get("accepted"):
