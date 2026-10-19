@@ -35,6 +35,8 @@ DEFAULT_REPO = "StevenMarketing/steven-ai-os"
 AUTHORIZED_ACTORS = ("StevenMarketing",)
 PROCESSED_PATH = os.environ.get("STEVEN_COMMAND_PROCESSED", "/opt/data/ops/bridge/processed-comments.json")
 LEDGER_PATH = os.environ.get("STEVEN_COMMAND_LEDGER", "/opt/data/ops/bridge/command-ledger.json")
+ACTIVATION_PATH = os.environ.get("STEVEN_LIVE_QUEUE_ACTIVATION",
+                                 "/opt/data/ops/bridge/live-queue-activation.json")
 
 
 def _load_json(path: str) -> Dict[str, Any]:
@@ -82,6 +84,71 @@ def issue_inspector_factory(request: Callable[..., Any], token: str, repo: str) 
                                     and "hermes-ready" in labels and verdict["usable"])}
 
     return inspect
+
+
+def find_open_pr_for_issue(request: Callable[..., Any], token: str, repo: str, number: int) -> bool:
+    """True when an open PR already references the issue (bounded scan, fail closed).
+
+    A lookup failure returns ``True`` so the caller refuses rather than risking a
+    duplicate enqueue.
+    """
+    try:
+        prs, _ = request("GET", "/repos/%s/pulls?state=open&per_page=100" % repo, token)
+    except Exception:
+        return True
+    needle = "#%d" % int(number)
+    for pr in prs or []:
+        head = str(((pr.get("head") or {}).get("ref")) or "")
+        haystack = "%s %s %s" % (pr.get("title") or "", pr.get("body") or "", head)
+        if needle in haystack or ("issue-%d" % int(number)) in head:
+            return True
+    return False
+
+
+def live_gate_factory(
+    request: Callable[..., Any],
+    token: str,
+    repo: str,
+    *,
+    processed: Dict[str, Any],
+    ledger: CommandLedger,
+    budget_guard: Optional[Callable[[str, Optional[int]], Any]] = None,
+    activation_path: Optional[str] = None,
+) -> Callable[[Dict[str, Any], Any], Dict[str, Any]]:
+    """Build the narrow opt-in gate for a LIVE ``queue_issue`` (Issue #51).
+
+    Default OFF: with no valid activation record the gate refuses before any
+    network call, so production behaviour is unchanged until the owner installs
+    the record. Everything is delegated to :mod:`gbp.bridge.live_queue`.
+    """
+    from gbp.bridge import live_queue as lq
+
+    def gate(validated: Dict[str, Any], trusted: Any) -> Dict[str, Any]:
+        now = time.time()
+        activation = lq.load_activation(activation_path if activation_path else ACTIVATION_PATH)
+        status = lq.activation_status(activation, now=now)
+        if not status["enabled"]:
+            return {"admitted": False, "operation": "queue_issue",
+                    "request_id": validated.get("request_id") if isinstance(validated, dict) else None,
+                    "issue": validated.get("issue") if isinstance(validated, dict) else None,
+                    "code": "live_queue_disabled",
+                    "reasons": ["live_queue_disabled: %s" % status["reason"]],
+                    "links": {}, "mutated": False}
+        number = validated.get("issue")
+        try:
+            payload, _ = request("GET", "/repos/%s/issues/%d" % (repo, int(number)), token)
+        except Exception:
+            return {"admitted": False, "operation": "queue_issue", "request_id": validated.get("request_id"),
+                    "issue": number, "code": "target_lookup_failed",
+                    "reasons": ["target_lookup_failed"], "links": {}, "mutated": False}
+        issue = {"number": payload.get("number"), "state": payload.get("state"),
+                 "repository": repo, "labels": payload.get("labels"), "body": payload.get("body")}
+        open_pr = find_open_pr_for_issue(request, token, repo, int(number))
+        return lq.evaluate_live_queue(validated=validated, trusted=trusted, activation=activation,
+                                      issue=issue, processed=processed, ledger=ledger,
+                                      budget_guard=budget_guard, open_pr=open_pr, now=now)
+
+    return gate
 
 
 def process_comment(
@@ -198,6 +265,7 @@ def main(argv=None, request: Optional[Callable[..., Any]] = None,
     ap.add_argument("--no-post", action="store_true", help="do not write to GitHub")
     ap.add_argument("--no-dry-run", action="store_true", help="force dry_run=false (safety test)")
     ap.add_argument("--json", action="store_true")
+    ap.add_argument("--activation", default="", help="path to the live queue_issue activation record (default OFF)")
     args = ap.parse_args(argv)
 
     import issue_github
@@ -220,10 +288,15 @@ def main(argv=None, request: Optional[Callable[..., Any]] = None,
         except Exception as exc:
             return {"allowed": True, "reason": "guard unavailable: %s" % type(exc).__name__}
 
-    executor = CommandExecutor(status_document=live_status_document,
-                              issue_inspector=issue_inspector_factory(request, token, args.repo))
     ledger = CommandLedger()
     processed = _load_json(PROCESSED_PATH)
+
+    executor = CommandExecutor(status_document=live_status_document,
+                              issue_inspector=issue_inspector_factory(request, token, args.repo),
+                              live_gate=live_gate_factory(request, token, args.repo,
+                                                          processed=processed, ledger=ledger,
+                                                          budget_guard=budget_guard,
+                                                          activation_path=args.activation or None))
 
     if args.command:
         envelope = {k: v for k, v in json.loads(args.command).items() if k != "errors"}

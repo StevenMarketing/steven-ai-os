@@ -48,10 +48,14 @@ class CommandExecutor:
         trace_path: Optional[str] = None,
         status_document: Optional[Callable[[], Dict[str, Any]]] = None,
         issue_inspector: Optional[Callable[[int], Dict[str, Any]]] = None,
+        live_gate: Optional[Callable[[Dict[str, Any], Any], Dict[str, Any]]] = None,
     ) -> None:
         self.trace_path = trace_path or DEFAULT_TRACE
         self._status_document = status_document
         self._issue_inspector = issue_inspector
+        #: Optional narrow opt-in gate for a LIVE ``queue_issue`` (Issue #51). When
+        #: absent the Phase-1 behaviour is unchanged: a live queue_issue is rejected.
+        self._live_gate = live_gate
         self.notes: list = []
 
     # -- trace ---------------------------------------------------------------
@@ -96,11 +100,24 @@ class CommandExecutor:
         return {"operation": "status", "read_only": True, "status": document,
                 "note": "live worker/cron/budget snapshot, redacted by the status publisher"}
 
-    def _op_queue_issue(self, validated: Dict[str, Any]) -> Dict[str, Any]:
+    def _op_queue_issue(self, validated: Dict[str, Any], trusted: Any = None) -> Dict[str, Any]:
         issue = validated.get("issue")
         if not validated.get("dry_run"):
-            raise ExecutionError(
-                "phase1_read_only: a live queue_issue is not authorized; send dry_run=true")
+            # Issue #51: a live queue_issue runs ONLY through the narrow opt-in gate.
+            # With no gate configured the Phase-1 refusal is unchanged.
+            if self._live_gate is None:
+                raise ExecutionError(
+                    "phase1_read_only: a live queue_issue is not authorized; send dry_run=true")
+            receipt = self._live_gate(validated, trusted)
+            admitted = bool((receipt or {}).get("admitted"))
+            result = {"operation": "queue_issue", "dry_run": False, "issue": issue,
+                      "would_queue": admitted, "admitted": admitted,
+                      "mutated": admitted, "receipt": receipt,
+                      "reason": (receipt or {}).get("code")}
+            if not admitted:
+                raise ExecutionError(
+                    "live_queue_refused: %s" % "; ".join((receipt or {}).get("reasons") or ["refused"]))
+            return result
         if self._issue_inspector is None or issue is None:
             return {"operation": "queue_issue", "dry_run": True, "issue": issue,
                     "would_queue": False, "mutated": False,
@@ -131,7 +148,7 @@ class CommandExecutor:
             if operation == "status":
                 result = self._op_status()
             elif operation == "queue_issue":
-                result = self._op_queue_issue(effective)
+                result = self._op_queue_issue(effective, trusted)
             else:
                 raise ExecutionError("operation %r is not implemented in phase 1" % operation)
         except ExecutionError as exc:

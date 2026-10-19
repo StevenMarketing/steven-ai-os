@@ -221,3 +221,61 @@ Evidence to record after deploying: the new status comment URL, the poll fingerp
 watchdog) the first green Actions run plus a red run produced by the stale-heartbeat simulation
 above. Rollback remains the env flags (`STEVEN_STATUS_PUBLISH=0`, `STEVEN_INTAKE_REJECT_COMMENTS=0`)
 before any file revert.
+
+
+---
+
+# ACTIVATION RECORD — Issue #51 (live `queue_issue` behind a narrow opt-in gate)
+
+Owner authorization recorded on Issue #51 (comment, 2026-10-19 GMT+7): enable **live
+`queue_issue` only for ordinary development Issues in `StevenMarketing/steven-ai-os`**,
+subject to review, passing tests and the existing security/budget boundaries.
+
+## What this PR delivers (unprotected paths only)
+
+| Piece | File | Behaviour |
+|---|---|---|
+| Opt-in gate | `src/gbp/bridge/live_queue.py` | Default **OFF**. A live `queue_issue` is admitted only when an owner-installed activation record exists *and* every check passes. |
+| Executor hook | `src/gbp/bridge/executor.py` | Optional `live_gate`; with no gate the Phase-1 refusal (`phase1_read_only`) is unchanged. |
+| Runner wiring | `scripts/bridge_commands.py` | `live_gate_factory(...)` builds the gate; `--activation PATH` overrides the default record path. |
+| Tests | `tests/test_live_queue_gate.py` | Unauthorized, forged, duplicate, expired, malformed, already-processed, unsafe, budget-exceeding and the exactly-once happy path — all offline. |
+
+The gate **never trusts payload claims**: it authorizes on the `TrustedContext` fetched
+from the GitHub API (comment author + collaborator permission), and re-checks the target
+is an open issue in the authorized repo with the trusted `hermes-ready` label, all five
+mandatory headings, no tripwire match, no existing claim/PR, and a passing budget guard.
+
+## Exact enablement (owner-only, deliberately manual)
+
+Live `queue_issue` stays OFF until the owner writes the activation record on the VPS:
+
+```sh
+cat > /opt/data/ops/bridge/live-queue-activation.json <<'JSON'
+{"enabled": true, "operation": "queue_issue",
+ "repository": "StevenMarketing/steven-ai-os",
+ "approved_by": "StevenMarketing",
+ "expires_at": 1798761600,
+ "note": "owner-approved live queue_issue, ordinary dev issues only"}
+JSON
+chmod 600 /opt/data/ops/bridge/live-queue-activation.json
+```
+
+* A missing, unreadable, malformed, wrong-operation, wrong-repo, non-owner or **expired**
+  record all resolve to `live_queue_disabled`.
+* `expires_at` is an epoch second; set it to the end of the approved window and refresh
+  it deliberately.
+
+## Rollback
+
+| Change | Rollback |
+|---|---|
+| Activation record | delete the file (or set `"enabled": false`) — immediate, no code change |
+| Runner wiring | pass `--activation /nonexistent` or unset `STEVEN_LIVE_QUEUE_ACTIVATION` |
+| This PR's modules | revert the merge commit; nothing else references them |
+
+## Explicitly NOT unlocked
+
+Everything outside `queue_issue` is unchanged: no shell, no protected-file writes, no
+budget/security/credential/OAuth changes, no public ports, no live Google actions, no
+deploy, no merge/approve. `pause_queue` / `resume_queue` / `retry_failed_issue` remain
+Phase-1 blocked.
