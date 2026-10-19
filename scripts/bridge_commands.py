@@ -105,6 +105,10 @@ def find_open_pr_for_issue(request: Callable[..., Any], token: str, repo: str, n
     return False
 
 
+#: Activation record in force for this process; main() sets it from --activation.
+_ACTIVATION_IN_USE: Dict[str, Any] = {"path": None}
+
+
 def activation_allows_live_queue(activation_path: Optional[str] = None) -> bool:
     """True only when the owner activation record for live queue_issue is valid.
 
@@ -220,7 +224,7 @@ def process_comment(
         return out
 
     validated = validate_command(envelope, now=now, ledger=ledger, budget_guard=budget_guard,
-                                     live_queue_allowed=activation_allows_live_queue(activation_path))
+                                     live_queue_allowed=activation_allows_live_queue(_ACTIVATION_IN_USE["path"]))
     out["validated"] = {k: validated.get(k) for k in ("accepted", "replay", "code", "operation")}
     if not validated.get("accepted"):
         out["action"] = "rejected"
@@ -293,6 +297,8 @@ def main(argv=None, request: Optional[Callable[..., Any]] = None,
     ap.add_argument("--activation", default="", help="path to the live queue_issue activation record (default OFF)")
     args = ap.parse_args(argv)
 
+    _ACTIVATION_IN_USE["path"] = args.activation or None
+
     import issue_github
 
     if request is None:
@@ -334,7 +340,7 @@ def main(argv=None, request: Optional[Callable[..., Any]] = None,
                     "trusted": getattr(trusted, "author_login", "")}]
         if ok:
             validated = validate_command(envelope, now=time.time(), ledger=ledger,
-                                         live_queue_allowed=activation_allows_live_queue(activation_path),
+                                         live_queue_allowed=activation_allows_live_queue(_ACTIVATION_IN_USE["path"]),
                                          budget_guard=budget_guard)
             results[0]["validated"] = {k: validated.get(k) for k in ("accepted", "code", "replay")}
             if validated.get("accepted"):
