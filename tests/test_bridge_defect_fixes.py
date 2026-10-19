@@ -623,3 +623,138 @@ class CrashRecoveryV2Tests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HardeningTests(unittest.TestCase):
+    """Final hardening: fail-visible markers, structured outcomes, safe reconciliation."""
+
+    def setUp(self):
+        self.claims = tempfile.mkdtemp()
+        self.snapshot = LedgerSnapshot(claims_dir=self.claims)
+
+    # 1. marker persistence must not swallow errors
+    def test_marker_write_failure_is_visible(self):
+        from unittest import mock
+        from bridge_commands import LedgerPersistenceError
+        payload = envelope()
+        self.snapshot.claim(payload["idempotency_key"], payload["request_id"])
+        with mock.patch("bridge_commands.os.replace", side_effect=OSError("disk full")):
+            with self.assertRaises(LedgerPersistenceError):
+                self.snapshot.settle(payload["idempotency_key"], payload["request_id"], "confirmed")
+
+    def test_partial_settlement_fails_visibly_instead_of_pretending_success(self):
+        from unittest import mock
+        from bridge_commands import LedgerPersistenceError
+        payload = envelope()
+        self.snapshot.claim(payload["idempotency_key"], payload["request_id"])
+        calls = {"n": 0}
+        real = self.snapshot._write_state
+
+        def flaky(value, state, reason):
+            calls["n"] += 1
+            if calls["n"] > 1:                      # the sibling marker write fails
+                raise LedgerPersistenceError("sibling marker write failed")
+            return real(value, state, reason)
+
+        with mock.patch.object(self.snapshot, "_write_state", flaky):
+            with self.assertRaises(LedgerPersistenceError):
+                self.snapshot.settle(payload["idempotency_key"], payload["request_id"], "confirmed")
+
+    def test_restart_reads_the_settled_state(self):
+        payload = envelope()
+        self.snapshot.claim(payload["idempotency_key"], payload["request_id"])
+        self.snapshot.settle(payload["idempotency_key"], payload["request_id"], "confirmed", "test")
+        restarted = LedgerSnapshot(claims_dir=self.claims)
+        self.assertEqual(restarted.pending_state(payload["idempotency_key"]), "confirmed")
+        self.assertEqual(restarted.pending_state(payload["request_id"]), "confirmed")
+
+    # 2. structured outcome classification, never from error text
+    def test_ambiguous_attempt_is_unknown_not_failed(self):
+        from bridge_commands import _settle_ledger_for_execution
+        payload = envelope()
+        self.snapshot.claim(payload["idempotency_key"], payload["request_id"])
+        state = _settle_ledger_for_execution(self.snapshot, payload, {
+            "result": {"mutated": False, "receipt": {"mutation": {
+                "attempted": True, "mutated": False, "error": "weird gibberish 999"}}}})
+        self.assertEqual(state, "unknown")
+
+    def test_never_attempted_is_failed_and_confirmed_is_confirmed(self):
+        from bridge_commands import _settle_ledger_for_execution
+        for mutation, expected in (({"attempted": False, "mutated": False}, "failed"),
+                                   ({"attempted": True, "mutated": True}, "confirmed")):
+            payload = envelope()
+            self.snapshot.claim(payload["idempotency_key"], payload["request_id"])
+            state = _settle_ledger_for_execution(self.snapshot, payload,
+                                                 {"result": {"receipt": {"mutation": mutation}}})
+            self.assertEqual(state, expected)
+
+    def test_stated_outcome_wins(self):
+        from bridge_commands import _settle_ledger_for_execution
+        payload = envelope()
+        self.snapshot.claim(payload["idempotency_key"], payload["request_id"])
+        state = _settle_ledger_for_execution(self.snapshot, payload,
+                                             {"result": {"outcome": "unknown", "mutated": False}})
+        self.assertEqual(state, "unknown")
+
+    # 3. reconciliation through the real runtime path
+    def _guard(self, labels, *, raised=False):
+        def request(method, path, token=None, body=None):
+            if raised:
+                raise RuntimeError("502 from GitHub")
+            return ({"number": 57, "labels": [{"name": n} for n in labels]}, {})
+        return request
+
+    def _pending_marker(self, issue=57):
+        payload = envelope()
+        self.snapshot.claim(payload["idempotency_key"], payload["request_id"], issue=issue)
+        return payload
+
+    def test_reconcile_label_present_confirms_and_keeps_the_marker(self):
+        from bridge_commands import reconcile_pending_markers
+        payload = self._pending_marker()
+        summary = reconcile_pending_markers(self._guard(["hermes-ready"]), "tok", REPO, self.snapshot)
+        self.assertEqual(summary["confirmed"], 1)
+        self.assertEqual(self.snapshot.pending_state(payload["idempotency_key"]), "confirmed")
+        self.assertTrue(os.path.exists(self.snapshot._claim_path(payload["idempotency_key"])))
+
+    def test_reconcile_label_absent_requires_manual_review(self):
+        from bridge_commands import reconcile_pending_markers
+        payload = self._pending_marker()
+        summary = reconcile_pending_markers(self._guard([]), "tok", REPO, self.snapshot)
+        self.assertEqual(summary["failed"], 0)                 # TTL/labels alone is not proof
+        self.assertEqual(summary["review"][0]["reason"], "no_label_no_authoritative_evidence")
+        self.assertEqual(self.snapshot.pending_state(payload["idempotency_key"]), "unknown")
+
+    def test_reconcile_api_failure_keeps_unknown_and_reviews(self):
+        from bridge_commands import reconcile_pending_markers
+        payload = self._pending_marker()
+        summary = reconcile_pending_markers(self._guard([], raised=True), "tok", REPO, self.snapshot)
+        self.assertEqual(summary["review"][0]["reason"], "github_unavailable")
+        self.assertEqual(self.snapshot.pending_state(payload["idempotency_key"]), "unknown")
+
+    def test_reconcile_skips_settled_markers_and_needs_no_duplicate_mutation(self):
+        from bridge_commands import reconcile_pending_markers
+        payload = self._pending_marker()
+        self.snapshot.settle(payload["idempotency_key"], payload["request_id"], "confirmed", "test")
+        summary = reconcile_pending_markers(self._guard(["hermes-ready"]), "tok", REPO, self.snapshot)
+        self.assertEqual(summary["checked"], 0)
+        gh = FakeGitHub()
+        execution = self._submit_through_gate(gh, payload)
+        self.assertIn("replay_duplicate", json.dumps(execution))
+        self.assertEqual(gh.label_posts, [])
+
+    def _submit_through_gate(self, gh, payload):
+        from gbp.bridge.executor import CommandExecutor
+        activation = write_activation()
+        self.addCleanup(os.unlink, activation)
+        gate = live_gate_factory(gh, "tok", REPO, processed={}, ledger=self.snapshot,
+                                 budget_guard=lambda op, i=None: {"allowed": True},
+                                 activation_path=activation)
+        validated = validate_command(payload, now=time.time(), ledger=CommandLedger(),
+                                     budget_guard=lambda op, i=None: {"allowed": True},
+                                     live_queue_allowed=True)
+        return CommandExecutor(trace_path=tempfile.mktemp(), live_gate=gate).execute(validated, trusted())
+
+
+if __name__ == "__main__":
+    unittest.main()

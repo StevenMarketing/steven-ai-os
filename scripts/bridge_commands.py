@@ -259,8 +259,11 @@ class LedgerSnapshot:
                 stream.flush()
                 os.fsync(stream.fileno())
             os.replace(temporary, path)
-        except OSError:
-            pass
+        except OSError as exc:
+            # A silently failed marker write would leave the state stale while the caller
+            # believes the outcome was recorded. Fail visibly and closed instead.
+            raise LedgerPersistenceError(
+                "marker state write FAILED for %s: %s" % (path, exc)) from exc
 
     def reconcile(self, value: Any, *, label_present: Optional[bool],
                   api_error: bool = False, authoritative_failure: bool = False,
@@ -318,7 +321,8 @@ class LedgerSnapshot:
         digest = hashlib.sha256(value.encode("utf-8")).hexdigest()[:32]
         return os.path.join(self.claims_dir, digest + ".claim")
 
-    def claim(self, idempotency_key: Any = None, request_id: Any = None) -> bool:
+    def claim(self, idempotency_key: Any = None, request_id: Any = None,
+              issue: Optional[int] = None) -> bool:
         """Atomically reserve the identifiers; False means someone else already holds them.
 
         ``O_CREAT|O_EXCL`` makes the reservation atomic across processes, so two runners
@@ -350,6 +354,7 @@ class LedgerSnapshot:
                 json.dump({"state": self.PENDING, "value": value,
                            "idempotency_key": idempotency_key,
                            "request_id": request_id,
+                           "issue": issue,
                            "created_at": moment}, stream)
             created.append(path)
         self.record(idempotency_key, request_id)
@@ -432,25 +437,76 @@ def live_gate_factory(
 
 def _settle_ledger_for_execution(ledger: "LedgerSnapshot", envelope: Dict[str, Any],
                                  execution: Dict[str, Any]) -> str:
-    """Record the durable outcome of one executed command.
+    """Record the durable outcome from STRUCTURED evidence, never from error text.
 
-    ``mutated`` true            -> confirmed (the label API confirmed the mutation);
-    a transport-style failure   -> unknown (GitHub may or may not have applied it);
-    anything else that ran      -> failed (the API answered and no mutation was applied).
+    ``outcome`` wins when the caller states it explicitly; otherwise ``mutated`` true ->
+    confirmed, the mutation was never attempted -> failed (an authoritative no-mutation),
+    and attempted-but-not-proven -> UNKNOWN, because without authoritative proof we cannot
+    claim the API did not apply it.
     """
     result = execution.get("result") or {}
     receipt = result.get("receipt") or {}
     mutation = receipt.get("mutation") or result.get("mutation") or {}
-    detail = "%s %s %s" % (result.get("reason") or "", result.get("error") or "",
-                           mutation.get("error") or "")
-    if result.get("mutated") or mutation.get("mutated"):
-        state, reason = ledger.CONFIRMED, "label_confirmed"
-    elif any(word in detail.lower() for word in ("transport", "timeout", "timed out", "502", "503", "504", "unavailable")):
-        state, reason = ledger.UNKNOWN, "github_unavailable"
+    stated = str(result.get("outcome") or mutation.get("outcome") or "").lower()
+    if stated == ledger.CONFIRMED:
+        state, reason = ledger.CONFIRMED, "stated_confirmed"
+    elif stated == ledger.FAILED:
+        state, reason = ledger.FAILED, "stated_failed"
+    elif stated == ledger.UNKNOWN:
+        state, reason = ledger.UNKNOWN, "stated_unknown"
+    elif result.get("mutated") or mutation.get("mutated"):
+        state, reason = ledger.CONFIRMED, "mutation_confirmed"
+    elif mutation.get("attempted") is False:
+        state, reason = ledger.FAILED, "mutation_never_attempted"
+    elif mutation.get("attempted"):
+        state, reason = ledger.UNKNOWN, "attempted_outcome_unproven"
     else:
-        state, reason = ledger.FAILED, "no_mutation_applied"
+        state, reason = ledger.FAILED, "nothing_to_mutate"
     ledger.settle(envelope.get("idempotency_key"), envelope.get("request_id"), state, reason)
     return state
+
+
+def reconcile_pending_markers(request: Callable[..., Any], token: str, repo: str,
+                              ledger: "LedgerSnapshot", *, limit: int = 25) -> Dict[str, Any]:
+    """Reconcile interrupted commands against GitHub state through the real runtime path.
+
+    Strict evidence rules: a missing label or an elapsed TTL never yields ``failed``; GitHub
+    being unreachable yields ``unknown`` plus manual review. Markers are never deleted.
+    """
+    summary = {"checked": 0, "confirmed": 0, "failed": 0, "review": []}
+    try:
+        names = sorted(os.listdir(ledger.claims_dir))[:limit]
+    except OSError:
+        return summary
+    for name in names:
+        if not name.endswith(".claim"):
+            continue
+        path = os.path.join(ledger.claims_dir, name)
+        try:
+            with open(path, "r", encoding="utf-8") as stream:
+                marker = json.load(stream)
+        except Exception:
+            continue                    # unreadable marker: kept for an operator to inspect
+        if str(marker.get("state") or "") not in ("pending", "unknown"):
+            continue
+        summary["checked"] += 1
+        number = marker.get("issue")
+        label_present, api_error = None, False
+        if isinstance(number, int):
+            try:
+                payload, _ = request("GET", "/repos/%s/issues/%d" % (repo, number), token)
+                on_issue = [label.get("name") for label in (payload.get("labels") or [])]
+                label_present = "hermes-ready" in on_issue
+            except Exception:
+                api_error = True
+        decision = ledger.reconcile(str(marker.get("value") or ""), label_present=label_present,
+                                    api_error=api_error or not isinstance(number, int))
+        if decision["state"] in ("confirmed", "failed"):
+            summary[decision["state"]] += 1
+        if decision.get("requires_manual_review"):
+            summary["review"].append({"value": marker.get("value"), "reason": decision.get("reason")})
+    return summary
+
 
 
 def process_comment(
@@ -601,6 +657,14 @@ def main(argv=None, request: Optional[Callable[..., Any]] = None,
     # Seeded before any validation: the gate must not see keys the validator writes.
     global _PRE_VALIDATION_LEDGER
     _PRE_VALIDATION_LEDGER = LedgerSnapshot.from_file(LEDGER_PATH)
+    # Reconcile interrupted commands once per run through the real path. A failure here is
+    # reported and never blocks the run; markers are preserved for manual review.
+    try:
+        _reconciled = reconcile_pending_markers(request, token, args.repo, _PRE_VALIDATION_LEDGER)
+        if _reconciled.get("review"):
+            print("MANUAL REVIEW REQUIRED: %s" % json.dumps(_reconciled["review"]), file=sys.stderr)
+    except Exception as _exc:
+        print("reconcile pass failed (markers kept): %s" % _exc, file=sys.stderr)
     processed = _load_json(PROCESSED_PATH)
 
     executor = CommandExecutor(status_document=live_status_document,

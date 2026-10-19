@@ -278,8 +278,13 @@ def evaluate_live_queue(
                 # so the check above alone is not enough; exactly one wins the claim and the
                 # other fails closed BEFORE any GitHub mutation. Ledgers without atomic
                 # claiming keep the previous behaviour.
-                if hasattr(ledger, "claim") and not ledger.claim(idem_key, request_id):
-                    return refuse("replay_duplicate", idem_key)
+                if hasattr(ledger, "claim"):
+                    try:
+                        _claimed = ledger.claim(idem_key, request_id, issue=validated.get("issue"))
+                    except TypeError:      # a ledger with an older claim() signature
+                        _claimed = ledger.claim(idem_key, request_id)
+                    if not _claimed:
+                        return refuse("replay_duplicate", idem_key)
             except Exception:  # fail closed on a broken ledger
                 return refuse("ledger_error")
 
