@@ -121,6 +121,7 @@ def live_gate_factory(
     network call, so production behaviour is unchanged until the owner installs
     the record. Everything is delegated to :mod:`gbp.bridge.live_queue`.
     """
+    from gbp.bridge import live_mutation as lm
     from gbp.bridge import live_queue as lq
 
     def gate(validated: Dict[str, Any], trusted: Any) -> Dict[str, Any]:
@@ -144,9 +145,17 @@ def live_gate_factory(
         issue = {"number": payload.get("number"), "state": payload.get("state"),
                  "repository": repo, "labels": payload.get("labels"), "body": payload.get("body")}
         open_pr = find_open_pr_for_issue(request, token, repo, int(number))
-        return lq.evaluate_live_queue(validated=validated, trusted=trusted, activation=activation,
-                                      issue=issue, processed=processed, ledger=ledger,
-                                      budget_guard=budget_guard, open_pr=open_pr, now=now)
+        receipt = lq.evaluate_live_queue(validated=validated, trusted=trusted, activation=activation,
+                                         issue=issue, processed=processed, ledger=ledger,
+                                         budget_guard=budget_guard, open_pr=open_pr, now=now)
+        # Issue #57: an admission is not an enqueue. Perform the ONE approved
+        # GitHub mutation (add ``hermes-ready``) and let the receipt's ``mutated``
+        # reflect the confirmed API result -- never the mere admission decision.
+        if receipt.get("admitted"):
+            lm.apply_mutation_to_receipt(receipt, request=request, token=token, repo=repo,
+                                         number=int(number),
+                                         existing_labels=lm.label_names(issue.get("labels")))
+        return receipt
 
     return gate
 

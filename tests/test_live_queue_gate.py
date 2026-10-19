@@ -48,8 +48,10 @@ def command(**over):
 
 
 def target(**over):
+    # Issue #57: a live enqueue ADDS ``hermes-ready``, so the target must not
+    # already carry it.
     base = {"number": 60, "state": "open", "repository": REPO,
-            "labels": [{"name": "hermes-ready"}], "body": GOOD_BODY}
+            "labels": [], "body": GOOD_BODY}
     base.update(over)
     return base
 
@@ -97,7 +99,10 @@ class TestLiveAdmission(unittest.TestCase):
                                        activation=act, issue=target(),
                                        processed=processed, budget_guard=ALLOW, now=NOW)
         self.assertTrue(first["admitted"], first["reasons"])
-        self.assertTrue(first["mutated"])
+        # Issue #57: an admission is not a mutation -- ``mutated`` is set only
+        # after the label API confirms it (see test_live_queue_mutation.py).
+        self.assertFalse(first["mutated"])
+        self.assertTrue(first["would_queue"])
         self.assertIn("/issues/60", first["links"]["issue"])
         self.assertEqual(first["code"], "admitted")
         # record the admission, then replay the very same request id
@@ -181,10 +186,17 @@ class TestRejections(unittest.TestCase):
         self.assertFalse(out["admitted"])
         self.assertEqual(out["code"], "target_not_open")
 
-    def test_missing_ready_label_refused(self):
-        out = self._eval(issue=target(labels=[{"name": "bug"}]))
+    def test_already_queued_label_refused(self):
+        # Issue #57: the enqueue adds ``hermes-ready``; a target that already
+        # carries it must never be enqueued a second time.
+        out = self._eval(issue=target(labels=[{"name": "hermes-ready"}]))
         self.assertFalse(out["admitted"])
-        self.assertEqual(out["code"], "target_missing_ready_label")
+        self.assertEqual(out["code"], "already_queued")
+
+    def test_settled_label_refused(self):
+        out = self._eval(issue=target(labels=[{"name": "hermes-done"}]))
+        self.assertFalse(out["admitted"])
+        self.assertEqual(out["code"], "target_already_settled")
 
     def test_missing_heading_refused(self):
         out = self._eval(issue=target(body="## Goal\nx\n"))
@@ -244,10 +256,13 @@ class TestReceipt(unittest.TestCase):
 class TestRunnerWiring(unittest.TestCase):
     """The production runner (``scripts/bridge_commands.py``) wires the gate, default OFF."""
 
-    def _request(self, *, state="open", labels=("hermes-ready",), body=GOOD_BODY, prs=()):
-        def request(method, path, token=None, _body=None):
+    def _request(self, *, state="open", labels=(), body=GOOD_BODY, prs=()):
+        def request(method, path, token=None, **kw):
             if "/pulls?state=open" in path:
                 return (list(prs), {})
+            if path.endswith("/labels") and method == "POST":
+                add = (kw.get("body") or {}).get("labels") or []
+                return ([{"name": n} for n in list(labels) + list(add)], {})
             if "/issues/60" in path:
                 return ({"number": 60, "state": state,
                          "labels": [{"name": n} for n in labels], "body": body}, {})
@@ -282,6 +297,10 @@ class TestRunnerWiring(unittest.TestCase):
                                             budget_guard=ALLOW, activation_path=path)
             out = gate(command(created_at=time.time()), ok_trusted())
         self.assertTrue(out["admitted"], out["reasons"])
+        # Issue #57: the runner performs the real label mutation; the receipt's
+        # ``mutated`` is true only because the fake API echoed the added label.
+        self.assertTrue(out["mutated"])
+        self.assertEqual(out["code"], "completed")
 
     def test_gate_refuses_when_an_open_pr_already_exists(self):
         import json
