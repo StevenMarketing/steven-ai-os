@@ -65,6 +65,11 @@ def envelope():
             "created_at": now, "ttl_seconds": 900, "dry_run": False}
 
 
+def _fresh_snapshot():
+    """Isolated claims directory: a test must never inherit another run's claims."""
+    return LedgerSnapshot(claims_dir=tempfile.mkdtemp())
+
+
 def trusted():
     return TrustedContext(REPO, "issue_comment", 1, OWNER, "OWNER", "admin", "issue_comment", True)
 
@@ -88,7 +93,7 @@ class Defect1Tests(unittest.TestCase):
     def test_first_time_admission_succeeds_with_a_snapshot_gate(self):
         gh = FakeGitHub()
         env = envelope()
-        validated, receipt = self._run(gh, env, LedgerSnapshot())
+        validated, receipt = self._run(gh, env, _fresh_snapshot())
         self.assertTrue(validated["accepted"], validated.get("errors"))
         self.assertEqual(receipt["state"], "completed", receipt["result"])
         self.assertTrue(receipt["result"]["mutated"])
@@ -97,7 +102,7 @@ class Defect1Tests(unittest.TestCase):
     def test_genuine_replay_from_a_previous_run_is_refused(self):
         gh = FakeGitHub()
         env = envelope()
-        snapshot = LedgerSnapshot()
+        snapshot = _fresh_snapshot()
         snapshot.record(env["idempotency_key"], env["request_id"])   # "already ran before restart"
         validated, receipt = self._run(gh, env, snapshot)
         self.assertTrue(validated["accepted"])                       # validator has a fresh ledger
@@ -109,7 +114,7 @@ class Defect1Tests(unittest.TestCase):
         gh = FakeGitHub()
         env = envelope()
         live = CommandLedger()
-        snapshot = LedgerSnapshot()
+        snapshot = _fresh_snapshot()
         _, first = self._run(gh, env, snapshot, live_ledger=live)
         snapshot.record(env["idempotency_key"], env["request_id"])   # runner records after execution
         second = validate_command(env, now=time.time(), ledger=live,
@@ -122,11 +127,11 @@ class Defect1Tests(unittest.TestCase):
 
     def test_api_failure_and_unconfirmed_mutation_are_refusals(self):
         for gh in (FakeGitHub(post_error="502"), FakeGitHub(confirm=False)):
-            _, receipt = self._run(gh, envelope(), LedgerSnapshot())
+            _, receipt = self._run(gh, envelope(), _fresh_snapshot())
             self.assertFalse(receipt["result"].get("mutated", False), receipt["result"])
 
     def test_snapshot_round_trips_through_the_persisted_file(self):
-        snapshot = LedgerSnapshot()
+        snapshot = _fresh_snapshot()
         snapshot.record("k1", "r1")
         path = tempfile.mktemp()
         with open(path, "w", encoding="utf-8") as handle:
@@ -255,7 +260,7 @@ gh = GH()
 validated = validate_command(env, now=time.time(), ledger=CommandLedger(),
                              budget_guard=lambda op, i=None: {"allowed": True},
                              live_queue_allowed=True)
-gate = live_gate_factory(gh, "tok", REPO, processed={}, ledger=LedgerSnapshot(),
+gate = live_gate_factory(gh, "tok", REPO, processed={}, ledger=_fresh_snapshot(),
                          budget_guard=lambda op, i=None: {"allowed": True},
                          activation_path=os.environ["ACTIVATION"])
 try:
@@ -389,7 +394,7 @@ sys.path.insert(0, os.path.join(ROOT, "src")); sys.path.insert(0, os.path.join(R
 while not os.path.exists(os.environ["GOFILE"]):
     time.sleep(0.005)
 from bridge_commands import LedgerSnapshot
-snap = LedgerSnapshot()
+snap = _fresh_snapshot()
 snap.claim(os.environ["K"], os.environ["R"])
 snap.save(os.environ["LEDGER"])
 print("saved")
