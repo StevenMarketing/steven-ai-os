@@ -105,6 +105,21 @@ def find_open_pr_for_issue(request: Callable[..., Any], token: str, repo: str, n
     return False
 
 
+def activation_allows_live_queue(activation_path: Optional[str] = None) -> bool:
+    """True only when the owner activation record for live queue_issue is valid.
+
+    The validator needs this to let a ``dry_run: false`` queue_issue through to the
+    gate. Everything else stays refused, and the gate re-checks the whole envelope.
+    """
+    try:
+        import gbp.bridge.live_queue as lq
+
+        record = lq.load_activation(activation_path if activation_path else ACTIVATION_PATH)
+        return bool(lq.activation_status(record, now=time.time()).get("enabled"))
+    except Exception:
+        return False
+
+
 def live_gate_factory(
     request: Callable[..., Any],
     token: str,
@@ -204,7 +219,8 @@ def process_comment(
         processed[cid] = {"state": "rejected", "code": code, "at": now}
         return out
 
-    validated = validate_command(envelope, now=now, ledger=ledger, budget_guard=budget_guard)
+    validated = validate_command(envelope, now=now, ledger=ledger, budget_guard=budget_guard,
+                                     live_queue_allowed=activation_allows_live_queue(activation_path))
     out["validated"] = {k: validated.get(k) for k in ("accepted", "replay", "code", "operation")}
     if not validated.get("accepted"):
         out["action"] = "rejected"
@@ -318,6 +334,7 @@ def main(argv=None, request: Optional[Callable[..., Any]] = None,
                     "trusted": getattr(trusted, "author_login", "")}]
         if ok:
             validated = validate_command(envelope, now=time.time(), ledger=ledger,
+                                         live_queue_allowed=activation_allows_live_queue(activation_path),
                                          budget_guard=budget_guard)
             results[0]["validated"] = {k: validated.get(k) for k in ("accepted", "code", "replay")}
             if validated.get("accepted"):
