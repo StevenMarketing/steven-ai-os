@@ -316,3 +316,118 @@ print(json.dumps({"accepted": bool(validated.get("accepted")) if isinstance(vali
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PartialClaimAndPendingTests(unittest.TestCase):
+    """Edge 1: a half-created claim must not persist, and an interrupted attempt must be
+    reported as an UNKNOWN outcome rather than as a confirmed failure."""
+
+    def setUp(self):
+        self.claims = tempfile.mkdtemp()
+        self.snapshot = LedgerSnapshot(claims_dir=self.claims)
+        self.activation = write_activation()
+        self.addCleanup(os.unlink, self.activation)
+
+    def _gate(self, snapshot):
+        return live_gate_factory(FakeGitHub(), "tok", REPO, processed={}, ledger=snapshot,
+                                 budget_guard=lambda op, i=None: {"allowed": True},
+                                 activation_path=self.activation)
+
+    def _validated(self, payload):
+        return validate_command(payload, now=time.time(), ledger=CommandLedger(),
+                                budget_guard=lambda op, i=None: {"allowed": True},
+                                live_queue_allowed=True)
+
+    def test_partial_claim_rolls_back_and_leaves_no_residue(self):
+        self.assertTrue(self.snapshot.claim(None, "req-held"))          # another process holds this
+        self.assertFalse(self.snapshot.claim("idem-fresh", "req-held"))  # partial failure
+        self.assertFalse(os.path.exists(self.snapshot._claim_path("idem-fresh")),
+                         "the key claim created before the failure must be rolled back")
+        self.assertEqual(self.snapshot.pending_state("idem-fresh"), None)
+        # recovery: the same idempotency key with a free request id is admissible again,
+        # so a partial failure cannot wedge a legitimate command forever
+        self.assertTrue(self.snapshot.claim("idem-fresh", "req-free"))
+
+    def test_crash_between_claim_and_mutation_is_pending_then_settles(self):
+        payload = envelope()
+        payload["idempotency_key"] = "idem-crash"
+        payload["request_id"] = "req-crash"
+        self.assertTrue(self.snapshot.claim("idem-crash", "req-crash"))   # claimed, then "crash"
+        self.assertEqual(self.snapshot.pending_state("idem-crash"), "pending")
+
+        receipt = self._gate(self.snapshot)(self._validated(payload), trusted())
+        self.assertIn("mutation_pending_unknown", json.dumps(receipt))   # unknown, not failure
+        self.assertFalse((receipt.get("result") or {}).get("mutated", False))
+
+        # a settled, confirmed outcome is a genuine replay ...
+        self.snapshot.settle("idem-crash", "req-crash", "confirmed")
+        self.assertEqual(self.snapshot.pending_state("idem-crash"), "confirmed")
+        self.assertIn("replay_duplicate",
+                      json.dumps(self._gate(self.snapshot)(self._validated(payload), trusted())))
+        # ... and a settled failure is also distinct from pending
+        self.snapshot.settle("idem-crash", "req-crash", "failed")
+        self.assertEqual(self.snapshot.pending_state("idem-crash"), "failed")
+
+    def test_pending_claim_still_blocks_any_second_mutation(self):
+        gh = FakeGitHub()
+        gate = live_gate_factory(gh, "tok", REPO, processed={}, ledger=self.snapshot,
+                                 budget_guard=lambda op, i=None: {"allowed": True},
+                                 activation_path=self.activation)
+        payload = envelope()
+        self.snapshot.claim(payload["idempotency_key"], payload["request_id"])
+        gate(self._validated(payload), trusted())
+        self.assertEqual(gh.label_posts, [])
+
+
+class ConcurrentPersistenceTests(unittest.TestCase):
+    """Edge 2: two processes persisting at once must not lose recorded identifiers."""
+
+    CHILD_SAVE = r"""
+import json, os, sys, time
+ROOT = os.environ["FIX2ROOT"]
+sys.path.insert(0, os.path.join(ROOT, "src")); sys.path.insert(0, os.path.join(ROOT, "scripts"))
+while not os.path.exists(os.environ["GOFILE"]):
+    time.sleep(0.005)
+from bridge_commands import LedgerSnapshot
+snap = LedgerSnapshot()
+snap.claim(os.environ["K"], os.environ["R"])
+snap.save(os.environ["LEDGER"])
+print("saved")
+"""
+
+    def test_two_processes_saving_concurrently_keep_every_identifier(self):
+        import subprocess
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        work = tempfile.mkdtemp()
+        go = os.path.join(work, "go")
+        ledger = os.path.join(work, "command-ledger.json")
+        child = tempfile.mktemp(suffix=".py")
+        with open(child, "w", encoding="utf-8") as handle:
+            handle.write(self.CHILD_SAVE)
+
+        base = dict(os.environ)
+        base.update({"FIX2ROOT": root, "GOFILE": go, "LEDGER": ledger,
+                     "STEVEN_BRIDGE_CLAIMS_DIR": os.path.join(work, "claims"),
+                     "PYTHONPATH": os.path.join(root, "src") + os.pathsep + os.path.join(root, "scripts")})
+        procs = []
+        for index in (1, 2):
+            env = dict(base, K="idem-%d" % index, R="req-%d" % index)
+            procs.append(subprocess.Popen([sys.executable, child], env=env,
+                                          stdout=subprocess.PIPE, stderr=subprocess.PIPE))
+        time.sleep(0.2)
+        open(go, "w").close()                      # both release together, then race
+        for proc in procs:
+            out, err = proc.communicate(timeout=90)
+            self.assertIn("saved", out.decode(), err.decode()[-200:])
+
+        # ... and after a "restart" (a fresh read of the persisted file)
+        restored = LedgerSnapshot.from_file(ledger)
+        for index in (1, 2):
+            self.assertEqual(restored.seen("idem-%d" % index), "idem-%d" % index,
+                             "a concurrently persisted key was lost")
+            self.assertEqual(restored.seen_request("req-%d" % index), "req-%d" % index,
+                             "a concurrently persisted request id was lost")
+
+
+if __name__ == "__main__":
+    unittest.main()

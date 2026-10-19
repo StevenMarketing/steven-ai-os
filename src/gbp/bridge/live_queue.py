@@ -259,6 +259,13 @@ def evaluate_live_queue(
             return refuse("already_processed", request_id)
         if ledger is not None and isinstance(idem_key, str):
             try:
+                # A claim without a settled outcome means a previous attempt may have been
+                # interrupted somewhere between claiming and mutating. That is an UNKNOWN
+                # outcome: it is refused (never retried blindly) and reported distinctly.
+                if hasattr(ledger, "pending_state"):
+                    for value in (idem_key, request_id):
+                        if isinstance(value, str) and value and ledger.pending_state(value) == "pending":
+                            return refuse("mutation_pending_unknown", value)
                 if ledger.seen(idem_key) is not None:
                     return refuse("replay_duplicate", idem_key)
                 if isinstance(request_id, str) and ledger.seen_request(request_id) is not None:
