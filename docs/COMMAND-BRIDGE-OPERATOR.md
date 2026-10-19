@@ -61,3 +61,4 @@ PYTHONPATH=src python3 scripts/bridge_commands.py --command '<envelope json>' # 
 The runner records every processed comment id (`ops/bridge/processed-comments.json`) and every state
 transition (`ops/bridge/commands.jsonl`), so a re-scan can never execute the same command twice.
 Its budget hook is the existing `worker_gate`; it never bypasses a guard.
+* Activation test ran on 2026-10-19 (issue #53): docs-only check, no behaviour change.
