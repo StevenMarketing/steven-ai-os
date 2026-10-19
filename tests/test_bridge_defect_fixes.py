@@ -316,3 +316,42 @@ print(json.dumps({"accepted": bool(validated.get("accepted")) if isinstance(vali
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PartialClaimRecoveryTests(unittest.TestCase):
+    """Fix 1: a claim that fails halfway must leave no residue and must not wedge the command."""
+
+    def setUp(self):
+        self.snapshot = LedgerSnapshot(claims_dir=tempfile.mkdtemp())
+
+    def test_partial_claim_is_unwound(self):
+        # another process already holds the request id
+        self.assertTrue(self.snapshot.claim(None, "req-held"))
+        self.assertFalse(self.snapshot.claim("idem-fresh", "req-held"))
+        self.assertFalse(os.path.exists(self.snapshot._claim_path("idem-fresh")),
+                         "the idempotency-key claim created before the failure must be unwound")
+        self.assertIsNone(self.snapshot.seen("idem-fresh"))
+
+    def test_recovery_after_a_partial_failure_is_possible(self):
+        self.snapshot.claim(None, "req-held")
+        self.snapshot.claim("idem-recover", "req-held")          # fails, unwinds
+        # the same key with a free request id is admissible again: no permanent false rejection
+        self.assertTrue(self.snapshot.claim("idem-recover", "req-fresh"))
+        self.assertEqual(self.snapshot.seen("idem-recover"), "idem-recover")
+
+    def test_already_held_identifier_is_a_conflict_not_a_noop(self):
+        self.assertTrue(self.snapshot.claim("idem-x", "req-x"))
+        # claiming again must FAIL (this was the defect: it returned True and left residue)
+        self.assertFalse(self.snapshot.claim("idem-x", "req-x"))
+        self.assertFalse(self.snapshot.claim("idem-x", None))
+
+    def test_replay_protection_survives_the_fix(self):
+        self.assertTrue(self.snapshot.claim("idem-y", "req-y"))
+        other = LedgerSnapshot(claims_dir=self.snapshot.claims_dir)   # another process, same dir
+        self.assertEqual(other.seen("idem-y"), "idem-y")             # visible on disk
+        self.assertEqual(other.seen_request("req-y"), "req-y")
+        self.assertFalse(other.claim("idem-y", "req-y"))             # genuine replay still refused
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -139,6 +139,19 @@ class LedgerSnapshot:
         data = _load_json(path)
         return cls(data.get("keys"), data.get("requests"))
 
+    @staticmethod
+    def _rollback(paths: List[str]) -> None:
+        """Unwind a partially created claim so no orphaned marker can wedge a command.
+
+        Without this, a failure on the request id after the idempotency key was created
+        left a claim behind that refused the legitimate command forever.
+        """
+        for path in paths:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+
     def record(self, idempotency_key: Any, request_id: Any) -> None:
         for value, target in ((idempotency_key, self._keys), (request_id, self._requests)):
             if isinstance(value, str) and value:
@@ -175,20 +188,25 @@ class LedgerSnapshot:
             os.makedirs(self.claims_dir, mode=0o700, exist_ok=True)
         except OSError:
             return False
+        created: List[str] = []
         for value in (idempotency_key, request_id):
             if not (isinstance(value, str) and value):
                 continue
-            if value in self._keys or (value in self._requests):
-                continue
+            # Already held -- in memory or on disk, by this process or another -- is a
+            # conflict, never a no-op, so nothing is admitted twice.
+            if (value in self._keys or value in self._requests
+                    or os.path.exists(self._claim_path(value))):
+                self._rollback(created)
+                return False
             path = self._claim_path(value)
             try:
                 handle = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-            except FileExistsError:
-                return False
-            except OSError:
+            except OSError:            # FileExistsError included: a racing process won
+                self._rollback(created)
                 return False
             with os.fdopen(handle, "w", encoding="utf-8") as stream:
                 stream.write("claimed\n")
+            created.append(path)
         self.record(idempotency_key, request_id)
         return True
 
