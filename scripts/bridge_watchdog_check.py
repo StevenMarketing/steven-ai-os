@@ -41,18 +41,37 @@ def newest_status_document(
 ) -> Optional[Dict[str, Any]]:
     """Return the parsed JSON from the most recent status comment, or None.
 
-    GitHub returns issue comments oldest-first unless asked otherwise, so reading page 1
-    used to return *ancient* documents and made the watchdog report a false
-    ``status_stale`` once the status issue passed 100 comments. We now ask for
-    newest-first ordering and, to stay correct even if a caller hands us another
-    ordering, prefer the document with the greatest parsable timestamp, falling back to
-    the last entry when no document carries one (the legacy behaviour).
+    GitHub does NOT honour ``sort``/``direction`` on the per-issue comments endpoint (it
+    returns oldest-first and ignores the parameters), which is why reading page 1 of a long
+    status issue reported a 12-hour-old document as stale while the publisher was healthy.
+    We therefore read the repository-level comments endpoint, which DOES support
+    newest-first ordering, and keep the ones belonging to this issue. If that is unavailable
+    we page through the per-issue endpoint and keep the newest document by timestamp.
     """
-    comments, _ = request(
-        "GET", "/repos/%s/issues/%d/comments?per_page=100&sort=created&direction=desc"
-        % (repo, int(issue_number)), token)
-    return _pick_newest_document(comments or [])
-
+    suffix = "/issues/%d" % int(issue_number)
+    try:
+        comments, _ = request(
+            "GET", "/repos/%s/issues/comments?sort=created&direction=desc&per_page=100" % repo,
+            token)
+        # A comment without issue_url cannot be attributed elsewhere, so treat it as ours
+        # (older callers and stubs omit the field).
+        mine = [c for c in (comments or [])
+                if not c.get("issue_url") or str(c.get("issue_url")).endswith(suffix)]
+        if mine:
+            return _pick_newest_document(mine, assume_newest_first=True)
+    except Exception:
+        pass                      # fall through to paging; never silently swallow forever
+    collected = []
+    for page in range(1, 11):
+        page_comments, _ = request(
+            "GET", "/repos/%s/issues/%d/comments?per_page=100&page=%d"
+            % (repo, int(issue_number), page), token)
+        if not page_comments:
+            break
+        collected.extend(page_comments)
+        if len(page_comments) < 100:
+            break
+    return _pick_newest_document(collected, assume_newest_first=False) if collected else None
 
 def _parsable_status_documents(comments: Any) -> List[Dict[str, Any]]:
     """Every comment body that carries a parsable ``json`` status document, in page order."""
@@ -77,7 +96,7 @@ def _unreadable(reason: str) -> Dict[str, Any]:
             "worker": {}, "cron": {}, "budget": {}}
 
 
-def _pick_newest_document(comments: Any) -> Optional[Dict[str, Any]]:
+def _pick_newest_document(comments: Any, *, assume_newest_first: bool = True) -> Optional[Dict[str, Any]]:
     """Authoritative status document, failing closed when the newest one is unusable.
 
     The page is requested newest-first, so the first fence-bearing comment is the newest
@@ -99,6 +118,23 @@ def _pick_newest_document(comments: Any) -> Optional[Dict[str, Any]]:
         candidates.append(parsed if isinstance(parsed, dict) else None)
     if not candidates:
         return None
+    if not assume_newest_first:
+        # Oldest-first page: pick the greatest parseable timestamp; if nothing parses we
+        # cannot tell what the newest document says, so alert rather than guess.
+        stamped = []
+        for document in candidates:
+            if document is None:
+                continue
+            value = document.get("generated_at")
+            if not isinstance(value, str):
+                continue
+            try:
+                stamped.append((datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ"), document))
+            except ValueError:
+                continue
+        if not stamped:
+            return _unreadable("no_parsable_status_document")
+        return max(stamped, key=lambda item: item[0])[1]
     newest = candidates[0]
     if newest is None:
         return _unreadable("malformed_newest_status")

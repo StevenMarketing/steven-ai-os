@@ -1,3 +1,4 @@
+import re
 """Regression tests for two verified production defects (owner-approved P0 fixes).
 
 DEFECT 1: the validator recorded an accepted command in the live ledger, and the activation
@@ -853,5 +854,88 @@ class FinalSafetyChecksTests(unittest.TestCase):
         self.assertEqual(with_proof["state"], "failed")
 
 
+class WatchdogPaginationRealTests(unittest.TestCase):
+    """The real GitHub behaviour: sort/direction are IGNORED on the per-issue comments
+    endpoint, so reading page 1 of a long status issue reports an ancient document as stale
+    while the publisher is healthy. These tests reproduce that contract exactly."""
+
+    def _status(self, generated_at, state="idle"):
+        import json as _json
+        doc = {"schema": "steven-ai-os/worker-status@1", "repository": REPO,
+               "generated_at": generated_at, "worker": {"state": state},
+               "cron": {"state": "scheduled"}, "budget": {}}
+        return "head\n```json\n%s\n```\n" % _json.dumps(doc)
+
+    def _old_page(self, count=100):
+        return [{"body": self._status("2026-01-01T00:00:00Z", "old")} for _ in range(count)]
+
+    def test_newest_is_found_when_the_issue_endpoint_ignores_direction(self):
+        newest = self._status("2026-10-20T05:00:00Z", "idle")
+
+        def request(method, path, token=None, body=None):
+            if "/issues/comments?" in path:                  # repo-level: honours newest-first
+                return ([{"issue_url": "https://api.github.com/repos/%s/issues/46" % REPO,
+                          "body": newest},
+                         {"body": self._status("2026-01-01T00:00:00Z", "older")}], {})
+            page = int(re.search(r"[?&]page=(\d+)", path).group(1))
+            return (self._old_page() if page == 1 else [], {})   # direction ignored, oldest first
+
+        found = newest_status_document(request, "tok", REPO, 46)
+        self.assertEqual(found["generated_at"], "2026-10-20T05:00:00Z")
+        self.assertEqual(found["worker"]["state"], "idle")
+
+    def test_fallback_pages_to_the_newest_when_the_repo_endpoint_fails(self):
+        newest = self._status("2026-10-20T05:00:00Z", "idle")
+
+        def request(method, path, token=None, body=None):
+            if "/issues/comments?" in path:
+                raise RuntimeError("403 on the repository comments endpoint")
+            page = int(re.search(r"[?&]page=(\d+)", path).group(1))
+            if page == 1:
+                return (self._old_page(), {})
+            if page == 2:
+                return (self._old_page(30) + [{"body": newest}], {})
+            return ([], {})
+
+        found = newest_status_document(request, "tok", REPO, 46)
+        self.assertEqual(found["generated_at"], "2026-10-20T05:00:00Z")
+
+    def test_malformed_newest_on_a_newest_first_page_alerts(self):
+        def request(method, path, token=None, body=None):
+            if "/issues/comments?" in path:
+                return ([{"issue_url": "https://api.github.com/repos/%s/issues/46" % REPO,
+                          "body": "```json\n{broken\n```"},
+                         {"issue_url": "https://api.github.com/repos/%s/issues/46" % REPO,
+                          "body": self._status("2026-10-01T00:00:00Z")}], {})
+            return (self._old_page(), {})
+
+        found = newest_status_document(request, "tok", REPO, 46)
+        self.assertEqual(found.get("reason"), "malformed_newest_status")
+        self.assertFalse(evaluate_external(found, now=time.time())["ok"])
+
+    def test_api_error_from_the_paging_path_is_not_swallowed(self):
+        def request(method, path, token=None, body=None):
+            raise RuntimeError("502 from GitHub")
+
+        with self.assertRaises(RuntimeError):
+            newest_status_document(request, "tok", REPO, 46)
+
+    def test_fresh_heartbeat_after_the_fix_produces_no_alert(self):
+        newest = self._status("2026-10-20T05:00:00Z")
+
+        def request(method, path, token=None, body=None):
+            if "/issues/comments?" in path:
+                return ([{"issue_url": "https://api.github.com/repos/%s/issues/46" % REPO,
+                          "body": newest}], {})
+            return (self._old_page(), {})
+
+        found = newest_status_document(request, "tok", REPO, 46)
+        from datetime import datetime as _dt, timezone as _tz
+        now = _dt(2026, 10, 20, 5, 5, tzinfo=_tz.utc).timestamp()
+        self.assertTrue(evaluate_external(found, now=now, max_age_seconds=900)["ok"])
+
+
+if __name__ == "__main__":
+    unittest.main()
 if __name__ == "__main__":
     unittest.main()
