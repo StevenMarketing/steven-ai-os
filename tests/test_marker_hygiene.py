@@ -74,59 +74,167 @@ class OneShotSettlementTests(unittest.TestCase):
 
 
 class LegacyMigrationTests(unittest.TestCase):
+    """Hardened migration: only the exact known legacy format is touched, backups verified
+    before any write, and concurrent modification, symlinks and partial failure abort safely."""
+
     def setUp(self):
         self.store = tempfile.mkdtemp()
         self.backups = tempfile.mkdtemp()
-        for index in (1, 2):
-            with open(os.path.join(self.store, "legacy%d.claim" % index), "w", encoding="utf-8") as handle:
-                handle.write("claimed\n")
-        with open(os.path.join(self.store, "modern.claim"), "w", encoding="utf-8") as handle:
-            json.dump({"state": "confirmed", "value": "x"}, handle)
 
-    def _names(self):
-        return sorted(os.listdir(self.store))
+    def _write(self, name, content):
+        path = os.path.join(self.store, name)
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(content)
+        return path
 
+    def _legacy(self, count=2):
+        for index in range(1, count + 1):
+            self._write("legacy%d.claim" % index, "claimed\n")
+
+    # --- 1. only the exact known legacy format is migrated -------------------------------
+    def test_malformed_json_missing_state_and_unknown_content_are_kept_and_reported(self):
+        self._legacy(1)
+        self._write("bad.claim", "{not json")
+        self._write("nostate.claim", '{"value": "x"}')
+        self._write("weird.claim", "[1, 2, 3]")                       # valid JSON, not an object
+        summary = migrate(self.store, apply=True, backup_root=self.backups)
+        self.assertEqual(summary["legacy"], 1)
+        self.assertEqual(summary["migrated"], 1)
+        self.assertEqual(summary["malformed"], 1)
+        self.assertEqual(summary["json_without_state"], 1)
+        self.assertEqual(summary["unknown_content"], 1)
+        self.assertEqual(open(os.path.join(self.store, "bad.claim")).read(), "{not json")
+        self.assertEqual(open(os.path.join(self.store, "nostate.claim")).read(), '{"value": "x"}')
+        self.assertEqual(open(os.path.join(self.store, "weird.claim")).read(), "[1, 2, 3]")
+        kinds = {p["kind"] for p in summary["problems"]}
+        self.assertEqual(kinds, {"malformed", "json_without_state", "unknown_content"})
+
+    def test_unreadable_marker_is_kept(self):
+        path = self._write("blocked.claim", "claimed")
+        os.chmod(path, 0)
+        try:
+            summary = migrate(self.store, apply=True, backup_root=self.backups)
+            if os.geteuid() == 0:
+                self.assertEqual(summary["migrated"], 1)      # root can read anything
+            else:
+                self.assertEqual(summary["unreadable"], 1)
+                self.assertEqual(summary["migrated"], 0)
+            self.assertTrue(os.path.exists(path))
+        finally:
+            os.chmod(path, 0o600)
+
+    def test_symlink_is_refused_and_its_target_untouched(self):
+        outside = tempfile.mkdtemp()                      # target lives outside the store
+        real = os.path.join(outside, "real.claim")
+        with open(real, "w", encoding="utf-8") as handle:
+            handle.write("claimed\n")
+        link = os.path.join(self.store, "link.claim")
+        os.symlink(real, link)
+        summary = migrate(self.store, apply=True, backup_root=self.backups)
+        self.assertEqual(summary["symlink"], 1)
+        self.assertEqual(summary["migrated"], 0, summary)  # nothing else was migratable
+        self.assertEqual(open(real).read(), "claimed\n")  # the target is untouched
+        self.assertTrue(os.path.islink(link))
+
+    # --- 2/3. backups verified before any write; concurrent change and partial failure ---
+    def test_backup_verified_before_any_write_and_aborts_on_failure(self):
+        self._legacy(2)
+        import migrate_markers
+        real_digest = migrate_markers.digest
+
+        def flaky(path):
+            if path.startswith(self.backups) and path.endswith("legacy2.claim"):
+                return "0" * 64
+            return real_digest(path)
+
+        original = migrate_markers.digest
+        migrate_markers.digest = flaky
+        try:
+            summary = migrate(self.store, apply=True, backup_root=self.backups)
+        finally:
+            migrate_markers.digest = original
+        self.assertTrue(summary["aborted"])
+        self.assertIn("backup verification failed", summary["aborted_reason"])
+        self.assertEqual(summary["migrated"], 0)
+        for name in ("legacy1.claim", "legacy2.claim"):
+            self.assertEqual(open(os.path.join(self.store, name)).read(), "claimed\n")
+
+    def test_concurrent_modification_aborts_without_writing(self):
+        self._legacy(2)
+        import migrate_markers
+        real_digest = migrate_markers.digest
+        calls = {"n": 0}
+
+        def changing(path):
+            if path.endswith("legacy2.claim") and not path.startswith(self.backups):
+                calls["n"] += 1
+                if calls["n"] >= 2:                # the pre-write re-check
+                    return "f" * 64
+            return real_digest(path)
+
+        migrate_markers.digest = changing
+        try:
+            summary = migrate(self.store, apply=True, backup_root=self.backups)
+        finally:
+            migrate_markers.digest = real_digest
+        self.assertTrue(summary["aborted"])
+        self.assertIn("concurrent modification", summary["aborted_reason"])
+        self.assertEqual(open(os.path.join(self.store, "legacy2.claim")).read(), "claimed\n")
+        self.assertTrue(os.path.isdir(summary["backup"]))       # rollback material exists
+
+    def test_partial_failure_stops_with_rollback_available(self):
+        self._legacy(3)
+        import migrate_markers
+        real_replace = os.replace
+        state = {"n": 0}
+
+        def failing(src, dst):
+            if dst.endswith(".claim"):
+                state["n"] += 1
+                if state["n"] == 2:
+                    raise OSError("disk full")
+            return real_replace(src, dst)
+
+        migrate_markers.os.replace = failing
+        try:
+            summary = migrate(self.store, apply=True, backup_root=self.backups)
+        finally:
+            migrate_markers.os.replace = real_replace
+        self.assertTrue(summary["aborted"])
+        self.assertEqual(summary["migrated"], 1)
+        self.assertIn("rollback: copy from", summary["aborted_reason"])
+        self.assertEqual(len(os.listdir(summary["backup"])), 3)   # every file backed up first
+
+    # --- existing guarantees -------------------------------------------------------------
     def test_dry_run_changes_nothing(self):
-        before = self._names()
+        self._legacy(2)
+        before = sorted(os.listdir(self.store))
         summary = migrate(self.store, apply=False)
         self.assertEqual(summary["legacy"], 2)
-        self.assertEqual(summary["already_json"], 1)
         self.assertEqual(summary["migrated"], 0)
-        self.assertEqual(before, self._names())
+        self.assertEqual(before, sorted(os.listdir(self.store)))
         self.assertEqual(open(os.path.join(self.store, "legacy1.claim")).read().strip(), "claimed")
 
-    def test_apply_migrates_to_unknown_with_a_backup_and_never_deletes(self):
+    def test_apply_migrates_only_the_known_format_and_never_deletes(self):
+        self._legacy(2)
+        self._write("modern.claim", json.dumps({"state": "confirmed", "value": "x"}))
         summary = migrate(self.store, apply=True, backup_root=self.backups)
         self.assertEqual(summary["migrated"], 2)
-        self.assertTrue(os.path.isdir(summary["backup"]))
-        self.assertEqual(len(os.listdir(summary["backup"])), 2)
+        self.assertEqual(summary["already_json"], 1)
         for name in ("legacy1.claim", "legacy2.claim"):
             document = json.load(open(os.path.join(self.store, name)))
             self.assertEqual(document["state"], "unknown")
-            self.assertNotEqual(document["state"], "confirmed")
             self.assertIn("legacy_plain_text_marker_migrated", document["reason"])
-        self.assertEqual(len(self._names()), 3)          # nothing deleted
+        self.assertEqual(len(os.listdir(self.store)), 3)
+        self.assertEqual(json.load(open(os.path.join(self.store, "modern.claim")))["state"], "confirmed")
 
     def test_migration_is_idempotent(self):
+        self._legacy(2)
         migrate(self.store, apply=True, backup_root=self.backups)
         second = migrate(self.store, apply=True, backup_root=self.backups)
         self.assertEqual(second["legacy"], 0)
         self.assertEqual(second["migrated"], 0)
-        self.assertEqual(second["already_json"], 3)
-
-    def test_unreadable_marker_is_reported_and_left_alone(self):
-        os.makedirs(self.store, exist_ok=True)
-        path = os.path.join(self.store, "blocked.claim")
-        with open(path, "w", encoding="utf-8") as handle:
-            handle.write("claimed")
-        os.chmod(path, 0)
-        try:
-            summary = migrate(self.store, apply=True, backup_root=self.backups)
-            if os.geteuid() != 0:
-                self.assertEqual(summary["unreadable"], 1)
-            self.assertTrue(os.path.exists(path))
-        finally:
-            os.chmod(path, 0o600)
+        self.assertEqual(second["already_json"], 2)
 
 
 if __name__ == "__main__":
