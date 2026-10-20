@@ -700,6 +700,13 @@ def main(argv=None, request: Optional[Callable[..., Any]] = None,
                 results[0]["execution"] = executor.execute(
                     validated, trusted,
                     dry_run_override=(False if args.no_dry_run else None))
+                # A real (non dry-run) command must record its durable outcome here too:
+                # the one-shot path bypasses process_comment, which is where the scan path
+                # settles. Without this the marker stays pending and only the reconcile
+                # pass resolves it, which weakens the marker store as an audit trail.
+                if not validated.get("dry_run"):
+                    _settle_ledger_for_execution(
+                        _PRE_VALIDATION_LEDGER, envelope, results[0]["execution"])
     elif args.scan and args.issue:
         results = scan(request, token, args.repo, args.issue, executor=executor, ledger=ledger,
                        processed=processed, dry_run_override=(False if args.no_dry_run else None),
