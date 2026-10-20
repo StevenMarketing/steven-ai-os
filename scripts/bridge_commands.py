@@ -18,6 +18,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import sys
@@ -109,6 +110,260 @@ def find_open_pr_for_issue(request: Callable[..., Any], token: str, repo: str, n
 _ACTIVATION_IN_USE: Dict[str, Any] = {"path": None}
 
 
+class LedgerPersistenceError(RuntimeError):
+    """Raised when the ledger cannot be persisted: the caller must fail closed."""
+
+
+class LedgerSnapshot:
+    """Replay view for the activation gate: entries that existed BEFORE this run.
+
+    The envelope validator records an accepted command in the live ledger. If the gate
+    then consulted that same ledger it would see the key the validator had just written
+    and refuse every command as ``replay_duplicate`` -- the production defect that made a
+    live ``queue_issue`` impossible. This snapshot is seeded from the persisted ledger at
+    process start and is updated only *after* a command completes, so:
+      * the current command is never refused by its own bookkeeping;
+      * a genuine replay (same idempotency key in an earlier run, or a second command in
+        this run) is still refused, including after a restart.
+    """
+
+    CLAIMS_DIR = os.environ.get("STEVEN_BRIDGE_CLAIMS_DIR") or os.path.join(
+        os.path.dirname(os.path.abspath(LEDGER_PATH)), "ledger-claims")
+
+    def __init__(self, keys: Optional[List[str]] = None,
+                 requests: Optional[List[str]] = None,
+                 claims_dir: Optional[str] = None) -> None:
+        self._keys = set(keys or ())
+        self._requests = set(requests or ())
+        self.claims_dir = claims_dir or (os.environ.get("STEVEN_BRIDGE_CLAIMS_DIR")
+                                         or self.CLAIMS_DIR)
+
+    def merge(self, keys: Any = None, requests: Any = None) -> None:
+        """Union in identifiers discovered in a concurrently written ledger file."""
+        self._keys |= set(keys or ())
+        self._requests |= set(requests or ())
+
+    def save(self, path: Optional[str] = None) -> None:
+        """Merge this snapshot into ``path`` under an exclusive lock, atomically.
+
+        Two runners persisting at the same time used to be a last-writer-wins overwrite,
+        which silently dropped the other process's identifiers and made them replayable
+        after a restart. The read-modify-write below is serialised with ``flock`` and
+        published with an atomic rename, so no recorded key or request id is ever lost.
+        """
+        import fcntl
+        target = path or LEDGER_PATH
+        try:
+            os.makedirs(os.path.dirname(os.path.abspath(target)), mode=0o700, exist_ok=True)
+        except OSError as exc:
+            raise LedgerPersistenceError("cannot create the ledger directory for %s: %s"
+                                         % (target, exc)) from exc
+        try:
+            with open(target + ".lock", "a+", encoding="utf-8") as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX)
+                try:
+                    stored = _load_json(target) or {}
+                    self.merge(stored.get("keys"), stored.get("requests"))
+                    temporary = "%s.tmp-%d" % (target, os.getpid())
+                    with open(temporary, "w", encoding="utf-8") as stream:
+                        json.dump(self.to_dict(), stream)
+                        stream.flush()
+                        os.fsync(stream.fileno())
+                    os.replace(temporary, target)
+                finally:
+                    fcntl.flock(lock, fcntl.LOCK_UN)
+        except OSError as exc:
+            # Never swallow this: a silently failed save would make a recorded command
+            # replayable after a restart. The error is visible and the caller fails closed.
+            raise LedgerPersistenceError(
+                "ledger persistence FAILED for %s: %s" % (target, exc)) from exc
+
+    @classmethod
+    def from_file(cls, path: str) -> "LedgerSnapshot":
+        data = _load_json(path)
+        return cls(data.get("keys"), data.get("requests"))
+
+    @staticmethod
+    def _rollback(paths: List[str]) -> None:
+        """Unwind a partially created claim so no orphaned marker can wedge a command.
+
+        Without this, a failure on the request id after the idempotency key was created
+        left a claim behind that refused the legitimate command forever.
+        """
+        for path in paths:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+
+    PENDING = "pending"
+    CONFIRMED = "confirmed"
+    FAILED = "failed"
+    UNKNOWN = "unknown"
+
+    def pending_state(self, value: Any) -> Optional[str]:
+        """The recorded state of a claimed identifier, or None when it was never claimed.
+
+        An unreadable marker reports ``unknown`` -- never "fine": we cannot tell what
+        happened, so the caller must fail closed and ask for manual review. Markers are
+        never deleted here.
+        """
+        if not isinstance(value, str) or not value:
+            return None
+        path = self._claim_path(value)
+        try:
+            with open(path, "r", encoding="utf-8") as stream:
+                return str(json.load(stream).get("state") or self.UNKNOWN)
+        except FileNotFoundError:
+            return None
+        except Exception:
+            return self.UNKNOWN
+
+    def settle(self, idempotency_key: Any, request_id: Any, state: str,
+               reason: str = "") -> None:
+        """Atomically record the outcome for this command in every one of its markers.
+
+        The identifiers of one command are stored in both markers, so settling one settles
+        its sibling too -- otherwise a request_id marker would stay pending forever and the
+        gate would keep refusing a command whose mutation is already confirmed. No file lock
+        is taken, so this can never deadlock against a ``save()`` holding the ledger lock.
+        """
+        pending = [value for value in (idempotency_key, request_id)
+                   if isinstance(value, str) and value]
+        seen = set()
+        for value in list(pending):
+            try:
+                with open(self._claim_path(value), "r", encoding="utf-8") as stream:
+                    marker = json.load(stream)
+                for sibling in (marker.get("idempotency_key"), marker.get("request_id")):
+                    if isinstance(sibling, str) and sibling and sibling not in seen:
+                        seen.add(sibling)
+                        pending.append(sibling)
+            except Exception:
+                continue
+            seen.add(value)
+        for value in pending:
+            self._write_state(value, state, reason)
+        self.record(idempotency_key, request_id)
+
+    def _write_state(self, value: str, state: str, reason: str) -> None:
+        """Atomically rewrite one marker (tmp + fsync + rename); never deletes it."""
+        path = self._claim_path(value)
+        if not os.path.exists(path):
+            return
+        temporary = "%s.state-%d-%d" % (path, os.getpid(), int(time.time() * 1e6))
+        try:
+            with open(temporary, "w", encoding="utf-8") as stream:
+                json.dump({"state": state, "value": value, "reason": reason,
+                           "settled_at": int(time.time())}, stream)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, path)
+        except OSError as exc:
+            # A silently failed marker write would leave the state stale while the caller
+            # believes the outcome was recorded. Fail visibly and closed instead.
+            raise LedgerPersistenceError(
+                "marker state write FAILED for %s: %s" % (path, exc)) from exc
+
+    def reconcile(self, value: Any, *, label_present: Optional[bool],
+                  api_error: bool = False, authoritative_failure: bool = False,
+                  now: Optional[float] = None) -> Dict[str, Any]:
+        """Decide the outcome of an interrupted command from evidence -- conservatively.
+
+        * GitHub unreachable                 -> `unknown`, manual review (never assumed failed);
+        * label present                      -> `confirmed` (the intended label state holds);
+          attribution to this exact request is recorded as uncertain, because a label can
+          also come from another actor;
+        * label absent, no authoritative proof -> `unknown`, manual review. An elapsed TTL
+          is NOT evidence that nothing happened, so it never decides `failed` by itself;
+        * authoritative_failure=True          -> `failed` (only when a caller holds real proof
+          that no mutation was applied, e.g. the API answered and refused before applying).
+        """
+        moment = time.time() if now is None else now
+        if authoritative_failure and not label_present:
+            self.settle(value, None, self.FAILED, "authoritative_no_mutation")
+            return {"state": self.FAILED, "reason": "authoritative_no_mutation"}
+        if api_error:
+            self.settle(value, None, self.UNKNOWN, "github_unavailable")
+            return {"state": self.UNKNOWN, "reason": "github_unavailable",
+                    "requires_manual_review": True}
+        if label_present is True:
+            self.settle(value, None, self.CONFIRMED, "label_present_attribution_uncertain")
+            return {"state": self.CONFIRMED, "reason": "label_present",
+                    "attribution_uncertain": True}
+        self.settle(value, None, self.UNKNOWN, "no_label_no_authoritative_evidence")
+        return {"state": self.UNKNOWN, "reason": "no_label_no_authoritative_evidence",
+                "requires_manual_review": True, "age_seconds": moment}
+
+    def record(self, idempotency_key: Any, request_id: Any) -> None:
+        for value, target in ((idempotency_key, self._keys), (request_id, self._requests)):
+            if isinstance(value, str) and value:
+                target.add(value)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {"keys": sorted(self._keys), "requests": sorted(self._requests)}
+
+    def seen(self, key: Any):
+        if not isinstance(key, str):
+            return None
+        if key in self._keys or os.path.exists(self._claim_path(key)):
+            return key
+        return None
+
+    def seen_request(self, request_id: Any):
+        if not isinstance(request_id, str):
+            return None
+        if request_id in self._requests or os.path.exists(self._claim_path(request_id)):
+            return request_id
+        return None
+
+    def _claim_path(self, value: str) -> str:
+        digest = hashlib.sha256(value.encode("utf-8")).hexdigest()[:32]
+        return os.path.join(self.claims_dir, digest + ".claim")
+
+    def claim(self, idempotency_key: Any = None, request_id: Any = None,
+              issue: Optional[int] = None) -> bool:
+        """Atomically reserve the identifiers; False means someone else already holds them.
+
+        ``O_CREAT|O_EXCL`` makes the reservation atomic across processes, so two runners
+        that race on the same command cannot both mutate. Any error fails closed.
+        """
+        try:
+            os.makedirs(self.claims_dir, mode=0o700, exist_ok=True)
+        except OSError:
+            return False
+        created: List[str] = []
+        moment = int(time.time())
+        for value in (idempotency_key, request_id):
+            if not (isinstance(value, str) and value):
+                continue
+            # Already held -- in memory or on disk, by this process or another -- is a
+            # conflict, never a no-op, so nothing is admitted twice.
+            if (value in self._keys or value in self._requests
+                    or os.path.exists(self._claim_path(value))):
+                self._rollback(created)
+                return False
+            path = self._claim_path(value)
+            try:
+                handle = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            except OSError:            # FileExistsError included: a racing process won
+                self._rollback(created)
+                return False
+            with os.fdopen(handle, "w", encoding="utf-8") as stream:
+                # The marker itself is the durable state: pending until settled.
+                json.dump({"state": self.PENDING, "value": value,
+                           "idempotency_key": idempotency_key,
+                           "request_id": request_id,
+                           "issue": issue,
+                           "created_at": moment}, stream)
+            created.append(path)
+        self.record(idempotency_key, request_id)
+        return True
+
+
+_PRE_VALIDATION_LEDGER = LedgerSnapshot()
+
+
 def activation_allows_live_queue(activation_path: Optional[str] = None) -> bool:
     """True only when the owner activation record for live queue_issue is valid.
 
@@ -177,6 +432,88 @@ def live_gate_factory(
         return receipt
 
     return gate
+
+
+
+def _settle_ledger_for_execution(ledger: "LedgerSnapshot", envelope: Dict[str, Any],
+                                 execution: Dict[str, Any]) -> str:
+    """Record the durable outcome from STRUCTURED evidence, never from error text.
+
+    Audit of every path that can yield FAILED (a claim about the real world):
+      * ``outcome="failed"`` stated by the caller        -> only a caller holding proof may say so;
+      * ``mutation.attempted is False`` with a mutation block present -> the mutation stage ran
+        and decided not to write: authoritative no-mutation;
+      * the gate refused before the mutation stage (``receipt.admitted is False``) -> no POST
+        could have happened: authoritative no-mutation.
+    Anything else -- including a receipt with no mutation evidence at all -- is UNKNOWN,
+    because we cannot prove the API did not apply the mutation.
+    """
+    result = execution.get("result") or {}
+    receipt = result.get("receipt") or {}
+    mutation = receipt.get("mutation") or result.get("mutation") or {}
+    stated = str(result.get("outcome") or mutation.get("outcome") or "").lower()
+    if stated == ledger.CONFIRMED:
+        state, reason = ledger.CONFIRMED, "stated_confirmed"
+    elif stated == ledger.FAILED:
+        state, reason = ledger.FAILED, "stated_failed_by_caller_with_proof"
+    elif stated == ledger.UNKNOWN:
+        state, reason = ledger.UNKNOWN, "stated_unknown"
+    elif result.get("mutated") or mutation.get("mutated"):
+        state, reason = ledger.CONFIRMED, "mutation_confirmed"
+    elif mutation.get("attempted") is False and mutation:
+        state, reason = ledger.FAILED, "mutation_never_attempted"
+    elif receipt.get("admitted") is False:
+        state, reason = ledger.FAILED, "gate_refused_before_mutation"
+    else:
+        state, reason = ledger.UNKNOWN, "no_authoritative_mutation_evidence"
+    ledger.settle(envelope.get("idempotency_key"), envelope.get("request_id"), state, reason)
+    return state
+
+def reconcile_pending_markers(request: Callable[..., Any], token: str, repo: str,
+                              ledger: "LedgerSnapshot", *, limit: int = 25) -> Dict[str, Any]:
+    """Reconcile interrupted commands against GitHub state through the real runtime path.
+
+    Strict evidence rules: a missing label or an elapsed TTL never yields ``failed``; GitHub
+    being unreachable yields ``unknown`` plus manual review. Markers are never deleted.
+    """
+    summary = {"checked": 0, "confirmed": 0, "failed": 0, "unreadable": 0, "review": []}
+    try:
+        names = sorted(os.listdir(ledger.claims_dir))[:limit]
+    except OSError:
+        return summary
+    for name in names:
+        if not name.endswith(".claim"):
+            continue
+        path = os.path.join(ledger.claims_dir, name)
+        try:
+            with open(path, "r", encoding="utf-8") as stream:
+                marker = json.load(stream)
+        except Exception as exc:
+            # Never a silent skip: an unreadable marker is precisely what a human must see.
+            summary["unreadable"] += 1
+            summary["review"].append({"marker": name, "reason": "marker_unreadable",
+                                      "detail": type(exc).__name__})
+            continue
+        if str(marker.get("state") or "") not in ("pending", "unknown"):
+            continue
+        summary["checked"] += 1
+        number = marker.get("issue")
+        label_present, api_error = None, False
+        if isinstance(number, int):
+            try:
+                payload, _ = request("GET", "/repos/%s/issues/%d" % (repo, number), token)
+                on_issue = [label.get("name") for label in (payload.get("labels") or [])]
+                label_present = "hermes-ready" in on_issue
+            except Exception:
+                api_error = True
+        decision = ledger.reconcile(str(marker.get("value") or ""), label_present=label_present,
+                                    api_error=api_error or not isinstance(number, int))
+        if decision["state"] in ("confirmed", "failed"):
+            summary[decision["state"]] += 1
+        if decision.get("requires_manual_review"):
+            summary["review"].append({"value": marker.get("value"), "reason": decision.get("reason")})
+    return summary
+
 
 
 def process_comment(
@@ -251,6 +588,10 @@ def process_comment(
         request("POST", "/repos/%s/issues/%d/comments" % (repo, comment["_issue"]), token,
                 body={"body": executor.result_text(execution["state"], validated, execution["result"])})
     ledger.record(envelope, validated.get("idempotency_key") or envelope.get("idempotency_key"), now=now)
+    # Only now does the gate's snapshot learn this key: the current command has finished,
+    # so a later command with the same idempotency key is a genuine replay and is refused
+    # (this is what makes duplicate rejection survive a restart, since the snapshot is persisted).
+    _settle_ledger_for_execution(_PRE_VALIDATION_LEDGER, envelope, execution)
     processed[cid] = {"state": execution["state"], "request_id": validated.get("request_id"),
                       "at": now}
     out.update(action="executed", execution=execution)
@@ -320,12 +661,24 @@ def main(argv=None, request: Optional[Callable[..., Any]] = None,
             return {"allowed": True, "reason": "guard unavailable: %s" % type(exc).__name__}
 
     ledger = CommandLedger()
+    # Seeded before any validation: the gate must not see keys the validator writes.
+    global _PRE_VALIDATION_LEDGER
+    _PRE_VALIDATION_LEDGER = LedgerSnapshot.from_file(LEDGER_PATH)
+    # Reconcile interrupted commands once per run through the real path. A failure here is
+    # reported and never blocks the run; markers are preserved for manual review.
+    try:
+        _reconciled = reconcile_pending_markers(request, token, args.repo, _PRE_VALIDATION_LEDGER)
+        if _reconciled.get("review"):
+            print("MANUAL REVIEW REQUIRED: %s" % json.dumps(_reconciled["review"]), file=sys.stderr)
+    except Exception as _exc:
+        print("reconcile pass failed (markers kept): %s" % _exc, file=sys.stderr)
     processed = _load_json(PROCESSED_PATH)
 
     executor = CommandExecutor(status_document=live_status_document,
                               issue_inspector=issue_inspector_factory(request, token, args.repo),
                               live_gate=live_gate_factory(request, token, args.repo,
-                                                          processed=processed, ledger=ledger,
+                                                          processed=processed,
+                                                          ledger=_PRE_VALIDATION_LEDGER,
                                                           budget_guard=budget_guard,
                                                           activation_path=args.activation or None))
 
@@ -356,6 +709,11 @@ def main(argv=None, request: Optional[Callable[..., Any]] = None,
 
     if not args.no_post:
         _save_json(PROCESSED_PATH, processed)
+        try:
+            _PRE_VALIDATION_LEDGER.save(LEDGER_PATH)
+        except LedgerPersistenceError as exc:
+            print("FAIL-CLOSED: %s" % exc, file=sys.stderr)
+            raise SystemExit(3)
     print(json.dumps(results, indent=2, sort_keys=True) if args.json
           else "bridge: %s" % json.dumps(results, sort_keys=True)[:600])
     return 0

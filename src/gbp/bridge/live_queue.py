@@ -259,10 +259,32 @@ def evaluate_live_queue(
             return refuse("already_processed", request_id)
         if ledger is not None and isinstance(idem_key, str):
             try:
+                # FIRST check, at the real admission gate: an identifier left in "pending"
+                # or "unknown" means the outcome of an earlier attempt cannot be established.
+                # Fail closed, report it distinctly, and never replay it automatically.
+                if hasattr(ledger, "pending_state"):
+                    for candidate in (idem_key, request_id):
+                        if not (isinstance(candidate, str) and candidate):
+                            continue
+                        state = ledger.pending_state(candidate)
+                        if state in ("pending", "unknown"):
+                            return refuse("mutation_pending_unknown", "%s:%s" % (candidate, state))
                 if ledger.seen(idem_key) is not None:
                     return refuse("replay_duplicate", idem_key)
                 if isinstance(request_id, str) and ledger.seen_request(request_id) is not None:
                     return refuse("replay_duplicate", request_id)
+                # Cross-process safety: reserve the identifiers atomically (O_CREAT|O_EXCL).
+                # Two runner processes racing on the same command both see an empty ledger,
+                # so the check above alone is not enough; exactly one wins the claim and the
+                # other fails closed BEFORE any GitHub mutation. Ledgers without atomic
+                # claiming keep the previous behaviour.
+                if hasattr(ledger, "claim"):
+                    try:
+                        _claimed = ledger.claim(idem_key, request_id, issue=validated.get("issue"))
+                    except TypeError:      # a ledger with an older claim() signature
+                        _claimed = ledger.claim(idem_key, request_id)
+                    if not _claimed:
+                        return refuse("replay_duplicate", idem_key)
             except Exception:  # fail closed on a broken ledger
                 return refuse("ledger_error")
 
