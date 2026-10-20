@@ -61,3 +61,11 @@ PYTHONPATH=src python3 scripts/bridge_commands.py --command '<envelope json>' # 
 The runner records every processed comment id (`ops/bridge/processed-comments.json`) and every state
 transition (`ops/bridge/commands.jsonl`), so a re-scan can never execute the same command twice.
 Its budget hook is the existing `worker_gate`; it never bypasses a guard.
+
+## Operator note
+
+Start with a `dry_run: true` `status` command and read the three acknowledgement comments before
+sending anything else. If a reply is missing or shows `-> rejected`, stop and check the `errors`
+list — do not resend the same envelope (the idempotency key will refuse it as a replay). Phase 1
+never posts publicly and never touches credentials, so an unexpected result is safe to investigate
+with no further command.
