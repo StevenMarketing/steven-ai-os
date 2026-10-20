@@ -279,3 +279,4 @@ Everything outside `queue_issue` is unchanged: no shell, no protected-file write
 budget/security/credential/OAuth changes, no public ports, no live Google actions, no
 deploy, no merge/approve. `pause_queue` / `resume_queue` / `retry_failed_issue` remain
 Phase-1 blocked.
+* **Live proof:** the production `queue_issue` enqueue path was exercised end-to-end on 2026-10-20 under owner authorization (throwaway run, no business side effects).
