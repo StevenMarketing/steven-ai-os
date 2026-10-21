@@ -613,8 +613,23 @@ def scan(
     post: bool = True,
     limit: int = 50,
 ) -> List[Dict[str, Any]]:
-    comments, _ = request("GET", "/repos/%s/issues/%d/comments?per_page=%d"
-                          % (repo, int(issue_number), limit), token)
+    if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 100:
+        raise ValueError("comment page size must be between 1 and 100")
+    # Collect every page before executing any command. A failed or truncated
+    # read must never look like a successful empty inbox scan.
+    comments = []
+    for page in range(1, 101):
+        path = "/repos/%s/issues/%d/comments?per_page=%d" % (repo, int(issue_number), limit)
+        if page > 1:
+            path += "&page=%d" % page
+        batch, _ = request("GET", path, token)
+        if not isinstance(batch, list):
+            raise ValueError("comment page must be a list")
+        comments.extend(batch)
+        if len(batch) < limit:
+            break
+    else:
+        raise RuntimeError("comment pagination limit reached; refusing partial scan")
     results = []
     for comment in comments or []:
         comment["_issue"] = int(issue_number)
