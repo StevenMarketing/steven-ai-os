@@ -113,9 +113,16 @@ class LegacyMigrationTests(unittest.TestCase):
         path = self._write("blocked.claim", "claimed")
         os.chmod(path, 0)
         try:
+            # UID 0 does not imply DAC override in restricted containers.
+            try:
+                with open(path, encoding="utf-8") as handle:
+                    handle.read()
+                readable = True
+            except PermissionError:
+                readable = False
             summary = migrate(self.store, apply=True, backup_root=self.backups)
-            if os.geteuid() == 0:
-                self.assertEqual(summary["migrated"], 1)      # root can read anything
+            if readable:
+                self.assertEqual(summary["migrated"], 1)
             else:
                 self.assertEqual(summary["unreadable"], 1)
                 self.assertEqual(summary["migrated"], 0)
