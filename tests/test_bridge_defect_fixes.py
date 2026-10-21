@@ -794,8 +794,15 @@ class FinalSafetyChecksTests(unittest.TestCase):
             handle.write("{}")
         os.chmod(blocked, 0)
         try:
+            # Container root may lack DAC override; probe actual readability.
+            try:
+                with open(blocked, encoding="utf-8") as handle:
+                    handle.read()
+                readable = True
+            except PermissionError:
+                readable = False
             summary = reconcile_pending_markers(self._guard([]), "tok", REPO, self.snapshot)
-            if os.geteuid() == 0:                      # root can read anything
+            if readable:
                 self.assertEqual(summary["unreadable"], 0)
             else:
                 self.assertEqual(summary["unreadable"], 1)
