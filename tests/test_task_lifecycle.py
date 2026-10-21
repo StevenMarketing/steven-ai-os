@@ -421,6 +421,26 @@ class EventTimeOrderingTest(unittest.TestCase):
 
 
 class CoordinatorBoundaryRegressionTest(unittest.TestCase):
+    def test_ambiguous_repository_components_are_rejected(self):
+        for owner, repo in (('%2e%2e', 'R'), ('S', '%2e%2e'),
+                            ('S', 'a%2fb'), ('S', 'a\\b'), ('S', 'a b')):
+            url = f'https://github.com/{owner}/{repo}/pull/7'
+            self.assertFalse(build_evidence(pr=url)['present'], url)
+
+    def test_enormous_integer_identifiers_are_domain_rejections(self):
+        with TaskLifecycleStore() as store:
+            for field in ('event_id', 'task_id', 'request_id'):
+                raw = ev('e1', 'queued')
+                raw[field] = 10 ** 5000
+                self.assertEqual(store.append_event(raw)['code'], 'malformed_event')
+            self.assertEqual(store.snapshot()['event_count'], 0)
+
+    def test_explicit_blank_request_is_rejected_after_correlation(self):
+        with TaskLifecycleStore() as store:
+            store.append_event(ev('e1', 'queued'))
+            self.assertEqual(store.append_event(ev('e2', 'claimed', request_id=''))['code'],
+                             'malformed_event')
+
     def test_huge_integer_timestamp_is_domain_error(self):
         with self.assertRaises(TaskLifecycleError):
             parse_timestamp(10 ** 1000)

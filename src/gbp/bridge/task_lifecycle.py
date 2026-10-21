@@ -49,6 +49,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
 import sqlite3
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
@@ -319,6 +320,12 @@ def _canonical_github_link(url: Any, kind: str) -> Optional[str]:
         return None
     if any(seg in ("", ".", "..") for seg in segments):
         return None
+    # Canonical repository components cannot contain escapes, separators or
+    # whitespace that a browser/server could interpret differently.
+    if not re.fullmatch(r"[A-Za-z0-9-]{1,39}", segments[0]):
+        return None
+    if not re.fullmatch(r"[A-Za-z0-9_.-]{1,100}", segments[1]):
+        return None
     expected = "issues" if kind == "issue" else "pull"
     if segments[2] != expected:
         return None
@@ -425,6 +432,8 @@ def _validate_identifier(value: Any, field: str) -> str:
     if isinstance(value, str):
         text = value.strip()
     elif isinstance(value, int):
+        if value.bit_length() > 665:
+            raise TaskLifecycleError(f"{field} is oversized")
         text = str(value)
     else:
         raise TaskLifecycleError(f"unsupported {field} type: {type(value).__name__}")
@@ -455,7 +464,7 @@ def _clean_event(event: Any) -> Dict[str, Any]:
         "task_id": _validate_identifier(event["task_id"], "task_id"),
         "status": status.strip(),
     }
-    if event.get("request_id") not in (None, ""):
+    if event.get("request_id") is not None:
         clean["request_id"] = _validate_identifier(event["request_id"], "request_id")
     if event.get("timestamp") not in (None, ""):
         clean["timestamp"] = normalize_timestamp(event["timestamp"])
@@ -531,7 +540,7 @@ class TaskLifecycleStore:
             clean = _clean_event(event)
         except TaskLifecycleError as exc:
             return {"accepted": False, "code": "malformed_event", "deduped": False,
-                    "task_id": str((event or {}).get("task_id", "")) if isinstance(event, dict) else "",
+                    "task_id": "",
                     "status": "", "event_id": "", "detail": str(exc)}
 
         try:
