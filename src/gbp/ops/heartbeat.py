@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -123,7 +124,18 @@ def heartbeat_state(*, now: float, last_poll: Optional[float] = None,
     """
     if blocked:
         return DEGRADED
+    # A readable ledger or fresh claim is not proof the worker still polls.
+    # Reject malformed/future evidence rather than manufacture freshness.
+    def valid(value):
+        return (not isinstance(value, bool) and isinstance(value, (int, float))
+                and math.isfinite(value))
+    if (not valid(now) or not valid(stall_seconds) or stall_seconds <= 0
+            or not valid(last_poll) or last_poll > now
+            or now - last_poll > stall_seconds):
+        return STALLED
     if running_since is not None:
+        if not valid(running_since) or running_since > now:
+            return STALLED
         return STALLED if (now - running_since) > stall_seconds else RUNNING
     if last_poll is None:
         return STALLED
