@@ -175,7 +175,7 @@ def normalize_timestamp(value: Any) -> str:
     anything unparseable, non-finite or out of range.
     """
     dt = parse_timestamp(value)
-    return dt.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+    return dt.isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
 def parse_timestamp(value: Any) -> datetime:
@@ -187,12 +187,18 @@ def parse_timestamp(value: Any) -> datetime:
     ``OverflowError``, ``OSError`` or ``TypeError``.
     """
     if isinstance(value, datetime):
-        dt = value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
-        return dt.astimezone(timezone.utc)
+        try:
+            dt = value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+            return dt.astimezone(timezone.utc)
+        except (ValueError, OverflowError, TypeError, OSError) as exc:
+            raise TaskLifecycleError("timestamp out of range") from exc
     if isinstance(value, bool):  # bool is an int subclass -- reject explicitly
         raise TaskLifecycleError("boolean is not a timestamp")
     if isinstance(value, (int, float)):
-        number = float(value)
+        try:
+            number = float(value)
+        except (OverflowError, ValueError, TypeError) as exc:
+            raise TaskLifecycleError("timestamp out of range") from exc
         if not math.isfinite(number):
             raise TaskLifecycleError("non-finite timestamp")
         try:
@@ -213,7 +219,10 @@ def parse_timestamp(value: Any) -> datetime:
             raise TaskLifecycleError(f"unparseable timestamp: {value!r}") from exc
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
-        return dt.astimezone(timezone.utc)
+        try:
+            return dt.astimezone(timezone.utc)
+        except (ValueError, OverflowError, TypeError, OSError) as exc:
+            raise TaskLifecycleError("timestamp out of range") from exc
     raise TaskLifecycleError(f"unsupported timestamp type: {type(value).__name__}")
 
 
@@ -225,7 +234,10 @@ def _valid_ttl(value: Any) -> Optional[float]:
     """Return a finite, non-negative TTL as float, else ``None`` (unknown)."""
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    number = float(value)
+    try:
+        number = float(value)
+    except (OverflowError, ValueError, TypeError):
+        return None
     if not math.isfinite(number) or number < 0:
         return None
     return number
@@ -255,6 +267,8 @@ def evaluate_freshness(*, now: Any, heartbeat: Any, ttl_seconds: float) -> Dict[
     except TaskLifecycleError:
         return {"state": "unknown", "age_seconds": None, "reason": "malformed_heartbeat"}
     try:
+        if now is None:
+            raise TaskLifecycleError("missing supplied clock")
         now_dt = _coerce_now(now)
     except TaskLifecycleError:
         return {"state": "unknown", "age_seconds": None, "reason": "invalid_now"}
@@ -309,12 +323,12 @@ def _canonical_github_link(url: Any, kind: str) -> Optional[str]:
     if segments[2] != expected:
         return None
     number_text = segments[3]
-    if not number_text.isdigit():
+    # IDs need no integer conversion; keep hostile long strings bounded.
+    if (not number_text or len(number_text) > 20 or
+            not number_text.isascii() or not number_text.isdigit() or
+            number_text[0] == "0"):
         return None
-    number = int(number_text)
-    if number <= 0 or number_text != str(number):
-        return None
-    return f"https://github.com/{segments[0]}/{segments[1]}/{expected}/{number}"
+    return f"https://github.com/{segments[0]}/{segments[1]}/{expected}/{number_text}"
 
 
 def build_evidence(*, issue: Any = None, pr: Any = None) -> Dict[str, Any]:
@@ -360,7 +374,7 @@ _NEXT_ACTION: Dict[str, str] = {
 
 def next_safe_action(status: Any) -> str:
     """Return the single recommended next action for ``status`` (never executes)."""
-    if status not in _NEXT_ACTION:
+    if not isinstance(status, str) or status not in _NEXT_ACTION:
         return "refuse_unknown_state"
     return _NEXT_ACTION[str(status)]
 
@@ -428,6 +442,8 @@ def _clean_event(event: Any) -> Dict[str, Any]:
     for field in REQUIRED_EVENT_FIELDS:
         if event.get(field) is None:
             raise TaskLifecycleError(f"event missing required field: {field}")
+    if any(not isinstance(key, str) for key in event):
+        raise TaskLifecycleError("event field names must be strings")
     unknown = set(event) - _EVENT_FIELDS
     if unknown:
         raise TaskLifecycleError(f"unknown event field(s): {sorted(unknown)}")
@@ -450,6 +466,8 @@ def _clean_event(event: Any) -> Dict[str, Any]:
     if ev is not None:
         if not isinstance(ev, dict):
             raise TaskLifecycleError("evidence must be a mapping")
+        if any(not isinstance(key, str) for key in ev):
+            raise TaskLifecycleError("evidence field names must be strings")
         unknown_ev = set(ev) - _EVIDENCE_FIELDS
         if unknown_ev:
             raise TaskLifecycleError(f"unknown evidence field(s): {sorted(unknown_ev)}")
@@ -516,8 +534,13 @@ class TaskLifecycleStore:
                     "task_id": str((event or {}).get("task_id", "")) if isinstance(event, dict) else "",
                     "status": "", "event_id": "", "detail": str(exc)}
 
-        now_dt = _coerce_now(now)
-        recorded_at = normalize_timestamp(now_dt)
+        try:
+            now_dt = _coerce_now(now)
+            recorded_at = normalize_timestamp(now_dt)
+        except TaskLifecycleError:
+            return {"accepted": False, "code": "invalid_now", "deduped": False,
+                    "task_id": clean["task_id"], "status": "",
+                    "event_id": clean["event_id"]}
         event_id = clean["event_id"]
         task_id = clean["task_id"]
         digest = _payload_hash(clean)
@@ -535,7 +558,7 @@ class TaskLifecycleStore:
                     "task_id": task_id, "status": "", "event_id": event_id}
 
         current = self._conn.execute(
-            "SELECT status, request_id, event_ts FROM task_state WHERE task_id = ?",
+            "SELECT status, request_id, event_ts, updated_at FROM task_state WHERE task_id = ?",
             (task_id,),
         ).fetchone()
         target = clean["status"]
@@ -660,6 +683,10 @@ class TaskLifecycleStore:
         ``unknown`` -- never silently substituted from the recorded state.
         """
         state = self.task_state(task_id)
+        if not state["known"]:
+            return {"state": "unknown", "age_seconds": None, "reason": "unknown_task",
+                    "task_id": task_id, "status": None,
+                    "next_safe_action": state["next_safe_action"]}
         verdict = evaluate_freshness(now=now, heartbeat=heartbeat,
                                      ttl_seconds=ttl_seconds)
         terminal_done = state.get("status") == "done"

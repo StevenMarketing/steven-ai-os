@@ -23,7 +23,7 @@ recommends a next safe action.
   always `unknown`.
 * Stores and exposes **canonical** safe GitHub issue/PR evidence links, refusing
   malformed ones (query strings, fragments, control characters, ambiguous paths,
-  zero/leading-zero ids, non-HTTPS or non-GitHub hosts).
+  zero/leading-zero/non-ASCII ids, IDs longer than 20 digits, non-HTTPS or non-GitHub hosts).
 * Redacts every free-text field with `gbp.security.redact.redact_text` before it is
   stored or read back. Events are treated strictly as data.
 
@@ -42,7 +42,9 @@ recommends a next safe action.
 | Malformed payload, bad identifier, unknown field/evidence key | refused (`malformed_event`) |
 | Non-finite / enormous / boolean timestamp | refused (`malformed_event`) |
 | Missing/expired/future heartbeat | `unknown` / `stale` |
-| Boolean / string / NaN / infinite TTL, invalid `now` | `unknown` (never raises) |
+| Boolean / string / NaN / infinite / enormous TTL, invalid or missing freshness `now` | `unknown` (never raises) |
+| Invalid explicit `append_event(now=...)` | refused (`invalid_now`), no write |
+| Freshness requested for an unknown task | `unknown` (`unknown_task`), even with a fresh heartbeat |
 | Restart / reopen | state, dedupe set and request correlation survive (SQLite file) |
 
 ### Provenance and correlation
@@ -59,7 +61,9 @@ A delayed event whose timestamp is older than the state's current event time is
 recorded but cannot move the state or refresh `updated_at`/freshness. Newer
 `blocked` and resume events remain valid, and the allowed `blocked → running` edge
 is checked **before** the rank test, so a legitimate resume always wins. Terminal
-states (`done`/`failed`) never reopen.
+states (`done`/`failed`) never reopen. UTC conversion overflow and enormous numeric
+inputs are refused without leaking built-in exceptions; canonical timestamps retain
+four-digit years so early dates round-trip correctly.
 
 `next_safe_action(status)` returns a **recommendation string only** — for example
 `await_worker_claim`, `begin_run`, `await_human_review`, `no_action_terminal`,

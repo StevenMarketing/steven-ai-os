@@ -418,5 +418,68 @@ class EventTimeOrderingTest(unittest.TestCase):
             self.assertEqual(s.task_state("t1")["status"], "done")
 
 
+
+
+class CoordinatorBoundaryRegressionTest(unittest.TestCase):
+    def test_huge_integer_timestamp_is_domain_error(self):
+        with self.assertRaises(TaskLifecycleError):
+            parse_timestamp(10 ** 1000)
+
+    def test_huge_integer_ttl_is_unknown(self):
+        result = evaluate_freshness(now=T1, heartbeat=T0, ttl_seconds=10 ** 1000)
+        self.assertEqual(result['state'], 'unknown')
+
+    def test_utc_conversion_overflow_is_domain_error(self):
+        for value in ('0001-01-01T00:00:00+01:00',
+                      '9999-12-31T23:59:59-01:00'):
+            with self.subTest(value=value), self.assertRaises(TaskLifecycleError):
+                parse_timestamp(value)
+            with self.subTest(value=value), self.assertRaises(TaskLifecycleError):
+                parse_timestamp(__import__('datetime').datetime.fromisoformat(value))
+
+    def test_invalid_append_clock_is_rejected_without_writes(self):
+        with TaskLifecycleStore() as store:
+            for value in (float('nan'), 10 ** 1000, 'bad', True):
+                result = store.append_event(ev('e1', 'queued'), now=value)
+                self.assertFalse(result['accepted'])
+                self.assertEqual(result['code'], 'invalid_now')
+                self.assertEqual(store.snapshot()['event_count'], 0)
+
+    def test_oversized_evidence_number_is_rejected(self):
+        url = 'https://github.com/S/R/pull/' + '1' * 5000
+        self.assertFalse(build_evidence(pr=url)['present'])
+        with TaskLifecycleStore() as store:
+            result = store.append_event(ev('e1', 'queued', evidence={'pr_url': url}))
+            self.assertEqual(result['code'], 'malformed_event')
+
+    def test_non_string_field_names_are_rejected(self):
+        with TaskLifecycleStore() as store:
+            for raw in (ev('e1', 'queued') | {'extra': 1, 1: 1},
+                        ev('e1', 'queued', evidence={'extra': 1, 1: 1})):
+                result = store.append_event(raw)
+                self.assertEqual(result['code'], 'malformed_event')
+                self.assertEqual(store.snapshot()['event_count'], 0)
+
+    def test_unknown_task_never_has_fresh_liveness(self):
+        with TaskLifecycleStore() as store:
+            result = store.task_freshness('missing', now=T0, heartbeat=T0, ttl_seconds=300)
+            self.assertEqual(result['state'], 'unknown')
+            self.assertEqual(result['reason'], 'unknown_task')
+
+    def test_non_scalar_unknown_status_returns_refusal(self):
+        for value in ([], {}, None):
+            self.assertEqual(next_safe_action(value), 'refuse_unknown_state')
+
+    def test_early_year_timestamp_round_trips(self):
+        canonical = normalize_timestamp('0001-01-01T00:00:00Z')
+        self.assertEqual(canonical, '0001-01-01T00:00:00.000Z')
+        self.assertEqual(parse_timestamp(canonical).year, 1)
+
+    def test_missing_supplied_clock_is_unknown(self):
+        result = evaluate_freshness(now=None, heartbeat=T0, ttl_seconds=300)
+        self.assertEqual(result['state'], 'unknown')
+        self.assertEqual(result['reason'], 'invalid_now')
+
+
 if __name__ == "__main__":
     unittest.main()
