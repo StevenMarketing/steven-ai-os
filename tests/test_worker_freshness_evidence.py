@@ -68,3 +68,15 @@ class FreshnessEvidenceTests(unittest.TestCase):
             result = cli.build(args)
             self.assertEqual(hb.DEGRADED, result["heartbeat"])
             self.assertEqual("state-unreadable", result["blocker"])
+
+    def test_oversized_numbers_fail_closed(self):
+        for value in [10**400, -(10**400)]:
+            for field in ["now", "last_poll", "running_since", "stall_seconds"]:
+                args = dict(now=1000, last_poll=990, running_since=990, stall_seconds=900)
+                args[field] = value
+                with self.subTest(field=field, sign=value > 0):
+                    self.assertEqual(hb.STALLED, hb.heartbeat_state(**args))
+            with tempfile.TemporaryDirectory() as tmp:
+                audit = Path(tmp) / "audit.jsonl"
+                audit.write_text(json.dumps({"ts": value}) + "\n")
+                self.assertIsNone(cli._last_audit_ts(str(audit)))
