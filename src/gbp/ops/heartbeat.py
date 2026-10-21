@@ -127,8 +127,11 @@ def heartbeat_state(*, now: float, last_poll: Optional[float] = None,
     # A readable ledger or fresh claim is not proof the worker still polls.
     # Reject malformed/future evidence rather than manufacture freshness.
     def valid(value):
-        return (not isinstance(value, bool) and isinstance(value, (int, float))
-                and math.isfinite(value))
+        try:
+            return (not isinstance(value, bool) and isinstance(value, (int, float))
+                    and math.isfinite(value))
+        except OverflowError:
+            return False
     if (not valid(now) or not valid(stall_seconds) or stall_seconds <= 0
             or not valid(last_poll) or last_poll > now
             or now - last_poll > stall_seconds):
