@@ -53,7 +53,7 @@ def _read_json(path: Optional[str]) -> tuple:
             if not isinstance(data, dict):
                 return None, "state-unreadable"
             return data, None
-    except (OSError, ValueError):
+    except (OSError, ValueError, OverflowError):
         return None, "state-unreadable"
 
 
@@ -79,7 +79,7 @@ def _last_audit_ts(path: Optional[str]) -> Optional[float]:
                     and math.isfinite(value)):
                 return float(value)
         return None
-    except (OSError, ValueError):
+    except (OSError, ValueError, OverflowError):
         return None
 
 
