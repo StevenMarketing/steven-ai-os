@@ -5,7 +5,13 @@ network, no scheduler. Covers the required list from the issue: happy path,
 duplicate/conflicting id, out-of-order, malformed, invalid transition, missing
 heartbeat, stalled, clock injection, crash/reopen, failed tests, completion
 evidence, plus redaction and evidence-link validation.
+
+Issue #80 adds the review-correction regressions: explicit heartbeat-only
+freshness, strict identifier/field/evidence rejection, finite exception-safe
+time validation, queued provenance + request correlation, and event-time
+ordering distinct from ``recorded_at``.
 """
+import math
 import os
 import tempfile
 import unittest
@@ -211,6 +217,205 @@ class EvidenceAndRedactionTest(unittest.TestCase):
         self.assertEqual(next_safe_action("nonsense"), "refuse_unknown_state")
         with self.assertRaises(TaskLifecycleError):
             normalize_timestamp("not a time")
+
+
+class FreshnessCorrectionTest(unittest.TestCase):
+    """#80: only an explicit heartbeat can make a task fresh."""
+
+    def test_omitted_heartbeat_is_unknown_and_updated_at_is_not_a_heartbeat(self):
+        with TaskLifecycleStore() as s:
+            s.append_event(ev("e1", "queued"), now=T0)
+            f = s.task_freshness("t1", now=T0, ttl_seconds=300)
+            # updated_at == T0 (inside TTL); it must NOT be used as a heartbeat.
+            self.assertEqual(s.task_state("t1")["updated_at"], normalize_timestamp(T0))
+            self.assertEqual(f["state"], "unknown")
+            self.assertEqual(f["reason"], "missing_heartbeat")
+            explicit = s.task_freshness("t1", now=T1, ttl_seconds=300, heartbeat=T0)
+            self.assertEqual(explicit["state"], "fresh")
+
+
+class TimeValidationTest(unittest.TestCase):
+    """#80: finite, exception-safe clocks/TTLs -- never an uncaught error."""
+
+    def test_non_finite_and_enormous_timestamps_are_rejected(self):
+        for raw in (float("nan"), float("inf"), float("-inf"), 10 ** 30,
+                    "nan", "inf", 1e309):
+            with self.assertRaises(TaskLifecycleError, msg=raw):
+                parse_timestamp(raw)
+
+    def test_bad_ttl_is_unknown(self):
+        for ttl in (True, "300", float("nan"), float("inf"), -1, None):
+            v = evaluate_freshness(now=T1, heartbeat=T0, ttl_seconds=ttl)
+            self.assertEqual(v["state"], "unknown", ttl)
+            self.assertEqual(v["reason"], "no_valid_ttl", ttl)
+
+    def test_invalid_now_is_unknown_not_raised(self):
+        v = evaluate_freshness(now=float("nan"), heartbeat=T0, ttl_seconds=300)
+        self.assertEqual(v["state"], "unknown")
+        self.assertEqual(v["reason"], "invalid_now")
+
+    def test_appending_a_non_finite_timestamp_is_malformed(self):
+        with TaskLifecycleStore() as s:
+            r = s.append_event(ev("e1", "queued", timestamp=float("inf")))
+            self.assertFalse(r["accepted"])
+            self.assertEqual(r["code"], "malformed_event")
+
+
+class IdentifierAndFieldTest(unittest.TestCase):
+    """#80: malformed identifiers and unknown fields are refused, not dropped."""
+
+    def test_bad_identifiers_rejected(self):
+        with TaskLifecycleStore() as s:
+            for bad in (True, ["e1"], {"id": "e1"}, "", "   ",
+                        "x" * 500):
+                raw = ev("e1", "queued")
+                raw["event_id"] = bad
+                r = s.append_event(raw)
+                self.assertFalse(r["accepted"], repr(bad))
+                self.assertEqual(r["code"], "malformed_event", repr(bad))
+
+    def test_unknown_event_field_rejected(self):
+        with TaskLifecycleStore() as s:
+            r = s.append_event(ev("e1", "queued", surprise="x"))
+            self.assertFalse(r["accepted"])
+            self.assertEqual(r["code"], "malformed_event")
+            self.assertEqual(len(s.events("t1")), 0)
+
+
+class EvidenceRejectionTest(unittest.TestCase):
+    """#80: malformed evidence refuses the whole event; only canonical URLs persist."""
+
+    BAD = (
+        PR_URL + "?token=abc",          # query string
+        PR_URL + "#frag",               # fragment
+        PR_URL + "/extra",              # ambiguous path
+        "https://github.com/S/R/pull/0",   # zero id
+        "https://github.com/S/R/pull/007",  # leading zero
+        "http://github.com/S/R/pull/7",     # non-HTTPS
+        "https://gitlab.com/S/R/pull/7",    # non-GitHub
+        "https://github.com/../R/pull/7",   # traversal
+        "https://github.com/S/R/pull/\x017",  # control char
+    )
+
+    def test_malformed_evidence_refuses_the_event(self):
+        with TaskLifecycleStore() as s:
+            for bad in self.BAD:
+                r = s.append_event(ev("e1", "queued", evidence={"pr_url": bad}))
+                self.assertFalse(r["accepted"], bad)
+                self.assertEqual(r["code"], "malformed_event", bad)
+                self.assertEqual(len(s.events("t1")), 0)
+
+    def test_canonical_url_is_persisted(self):
+        with TaskLifecycleStore() as s:
+            s.append_event(ev("e1", "queued"))
+            r = s.append_event(ev("e2", "claimed",
+                                  evidence={"pr_url": PR_URL + "?x=1"}))
+            self.assertFalse(r["accepted"])
+            self.assertEqual(build_evidence(pr=PR_URL)["pr_url"], PR_URL)
+
+    def test_unknown_evidence_field_rejected(self):
+        with TaskLifecycleStore() as s:
+            r = s.append_event(ev("e1", "queued", evidence={"pr_url": PR_URL, "extra": 1}))
+            self.assertFalse(r["accepted"])
+            self.assertEqual(r["code"], "malformed_event")
+
+
+class ProvenanceTest(unittest.TestCase):
+    """#80: queued initial state + stable request_id correlation."""
+
+    def test_non_queued_initial_state_refused(self):
+        with TaskLifecycleStore() as s:
+            r = s.append_event(ev("e1", "done", evidence={"pr_url": PR_URL}))
+            self.assertFalse(r["accepted"])
+            self.assertEqual(r["code"], "invalid_initial_state")
+            self.assertEqual(s.task_state("t1")["status"], None)
+
+    def test_initial_event_requires_request_id(self):
+        with TaskLifecycleStore() as s:
+            raw = {"event_id": "e1", "task_id": "t1", "status": "queued"}
+            r = s.append_event(raw)
+            self.assertFalse(r["accepted"])
+            self.assertEqual(r["code"], "missing_request_id")
+
+    def test_later_event_may_omit_request_id_and_conflict_is_rejected(self):
+        with TaskLifecycleStore() as s:
+            s.append_event(ev("e1", "queued", request_id="req-a"))
+            omitted = {"event_id": "e2", "task_id": "t1", "status": "claimed",
+                       "timestamp": T1}
+            self.assertTrue(s.append_event(omitted)["accepted"])
+            conflict = s.append_event(ev("e3", "running", request_id="req-b",
+                                         timestamp="2026-10-21T09:02:00Z"))
+            self.assertFalse(conflict["accepted"])
+            self.assertEqual(conflict["code"], "conflicting_request_id")
+            self.assertEqual(s.task_state("t1")["request_id"], "req-a")
+
+    def test_request_correlation_survives_reopen(self):
+        fd, path = tempfile.mkstemp(suffix=".sqlite")
+        os.close(fd)
+        try:
+            s1 = TaskLifecycleStore(path)
+            s1.append_event(ev("e1", "queued", request_id="req-keep"))
+            s1.close()
+            s2 = TaskLifecycleStore(path)
+            self.assertEqual(s2.task_state("t1")["request_id"], "req-keep")
+            conflict = s2.append_event(ev("e2", "claimed", request_id="req-other", timestamp=T1))
+            self.assertEqual(conflict["code"], "conflicting_request_id")
+            s2.close()
+        finally:
+            os.unlink(path)
+
+
+class EventTimeOrderingTest(unittest.TestCase):
+    """#80: ordering uses persisted event timestamps, not recorded_at."""
+
+    def test_older_delayed_event_cannot_move_state_nor_refresh_updated_at(self):
+        with TaskLifecycleStore() as s:
+            s.append_event(ev("e1", "queued", timestamp=T0), now=T0)
+            s.append_event(ev("e2", "claimed", timestamp="2026-10-21T09:05:00Z"),
+                           now="2026-10-21T09:05:00Z")
+            before = s.task_state("t1")
+            # An older delayed "running" event arrives after the claim.
+            late = s.append_event(ev("e3", "running", timestamp="2026-10-21T09:01:00Z"),
+                                  now="2026-10-21T09:09:00Z")
+            self.assertTrue(late["accepted"])
+            self.assertEqual(late["code"], "out_of_order")
+            after = s.task_state("t1")
+            self.assertEqual(after["status"], "claimed")
+            self.assertEqual(after["updated_at"], before["updated_at"])
+            self.assertEqual(after["event_ts"], before["event_ts"])
+
+    def test_newer_blocked_and_resume_events_remain_valid(self):
+        with TaskLifecycleStore() as s:
+            s.append_event(ev("e1", "queued", timestamp=T0), now=T0)
+            s.append_event(ev("e2", "claimed", timestamp="2026-10-21T09:01:00Z"),
+                           now="2026-10-21T09:01:00Z")
+            s.append_event(ev("e3", "running", timestamp="2026-10-21T09:02:00Z"),
+                           now="2026-10-21T09:02:00Z")
+            blocked = s.append_event(ev("e4", "blocked", reason="waiting",
+                                        timestamp="2026-10-21T09:03:00Z"),
+                                     now="2026-10-21T09:03:00Z")
+            self.assertEqual(blocked["status"], "blocked")
+            # allowed edge blocked -> running is checked before the rank test
+            resume = s.append_event(ev("e5", "running", timestamp="2026-10-21T09:04:00Z"),
+                                    now="2026-10-21T09:04:00Z")
+            self.assertTrue(resume["accepted"])
+            self.assertEqual(resume["status"], "running")
+
+    def test_terminal_state_cannot_reopen(self):
+        with TaskLifecycleStore() as s:
+            for e, st, ts in [("e1", "queued", "2026-10-21T09:00:00Z"),
+                              ("e2", "claimed", "2026-10-21T09:01:00Z"),
+                              ("e3", "running", "2026-10-21T09:02:00Z"),
+                              ("e4", "testing", "2026-10-21T09:03:00Z"),
+                              ("e5", "review_ready", "2026-10-21T09:04:00Z")]:
+                s.append_event(ev(e, st, timestamp=ts), now=ts)
+            s.append_event(ev("e6", "done", timestamp="2026-10-21T09:05:00Z",
+                              evidence={"pr_url": PR_URL}), now="2026-10-21T09:05:00Z")
+            reopen = s.append_event(ev("e7", "running", timestamp="2026-10-21T09:06:00Z"),
+                                    now="2026-10-21T09:06:00Z")
+            self.assertEqual(s.task_state("t1")["status"], "done")
+            self.assertIn(reopen["code"], ("out_of_order", "invalid_transition"))
+            self.assertEqual(s.task_state("t1")["status"], "done")
 
 
 if __name__ == "__main__":
