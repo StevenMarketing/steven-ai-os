@@ -82,7 +82,7 @@ def _complete_profile(index: int, zipcode: str) -> dict:
         "secondary_categories": ["Manicure", "Pedicure"],
         "services": ["Manicure", "Pedicure", "Gel Nails"],
         "description": ("Chain Nails is a synthetic shop used only by offline "
-                        "tests. It lists manicures and pedicures in a short "
+                        "tests. It lists manicures, pedicures and gel nails in a short "
                         "paragraph so the length checks have realistic text "
                         "without any real business or customer data, and it is "
                         "long enough to satisfy the recommended minimum "

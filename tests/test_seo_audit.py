@@ -38,10 +38,11 @@ def _profile(**overrides):
         "secondary_categories": ["Manicure", "Pedicure"],
         "services": ["Manicure", "Pedicure", "Gel Nails"],
         "description": ("Fixture Nails is a synthetic shop used only for offline "
-                        "tests. It lists manicures and pedicures and a short "
-                        "paragraph so the length checks have something realistic "
-                        "to measure without any real customer or business data "
-                        "appearing anywhere in this file or in the report."),
+                        "tests. It lists manicures, pedicures and gel nails and "
+                        "a short paragraph so the length checks have something "
+                        "realistic to measure without any real customer or "
+                        "business data appearing anywhere in this file or in the "
+                        "report."),
         "hours": {day: {"open": "09:00", "close": "19:00"} for day in seo._WEEKDAYS},
         "phone": "+1 714-555-0100",
         "website": "https://example.invalid/fixture",
@@ -172,6 +173,82 @@ class DescriptionTests(unittest.TestCase):
     def test_natural_prose_is_not_stuffing(self):
         loc = audit_location(_profile())
         self.assertNotIn("SEO-DESCRIPTION-KEYWORD-STUFFING", _codes(loc))
+
+
+class DescriptionServicesCoherenceTests(unittest.TestCase):
+    """Issue #86: deterministic description <-> services cross-reference."""
+
+    def test_listed_service_absent_from_description_is_flagged(self):
+        loc = audit_location(_profile(
+            services=["Manicure", "Pedicure", "Acrylic Nails"]))
+        findings = [f for f in loc.findings
+                    if f.code == "SEO-SERVICES-NOT-IN-DESCRIPTION"]
+        self.assertEqual(len(findings), 1, _codes(loc))
+        self.assertEqual(findings[0].severity, "low")
+        self.assertIn("'Acrylic Nails'", findings[0].evidence)
+
+    def test_described_service_absent_from_list_is_flagged(self):
+        loc = audit_location(_profile(
+            services=["Manicure"],
+            description=_profile()["description"] + " We also mention nail art."))
+        findings = [f for f in loc.findings
+                    if f.code == "SEO-DESCRIPTION-SERVICE-NOT-LISTED"]
+        self.assertTrue(findings, _codes(loc))
+        # every finding quotes the matched vocabulary term it is about
+        for f in findings:
+            self.assertIn("description term=", f.evidence)
+        self.assertTrue(any("'nail art'" in f.evidence for f in findings),
+                        [f.evidence for f in findings])
+
+    def test_coherent_profile_produces_no_coherence_findings(self):
+        codes = set(_codes(audit_location(_profile())))
+        self.assertNotIn("SEO-SERVICES-NOT-IN-DESCRIPTION", codes)
+        self.assertNotIn("SEO-DESCRIPTION-SERVICE-NOT-LISTED", codes)
+
+    def test_check_is_skipped_when_one_side_is_missing(self):
+        # A missing services list or description belongs to the completeness
+        # check, not to the cross-reference.
+        for overrides in ({"services": []}, {"description": ""}):
+            with self.subTest(overrides=overrides):
+                codes = _codes(audit_location(_profile(**overrides)))
+                self.assertNotIn("SEO-SERVICES-NOT-IN-DESCRIPTION", codes)
+                self.assertNotIn("SEO-DESCRIPTION-SERVICE-NOT-LISTED", codes)
+
+    def test_plural_forms_match(self):
+        # "manicures" in the description matches the listed "Manicure".
+        loc = audit_location(_profile(services=["Manicure"],
+                                      description="We do manicures all week."))
+        self.assertNotIn("SEO-SERVICES-NOT-IN-DESCRIPTION", _codes(loc))
+
+    def test_coherence_is_order_independent(self):
+        services = ["Acrylic Nails", "Dip Powder", "Shellac"]
+        loc_a = audit_location(_profile(services=list(services),
+                                        description="manicures and pedicures"))
+        loc_b = audit_location(_profile(services=list(reversed(services)),
+                                        description="manicures and pedicures"))
+        self.assertEqual(loc_a.findings, loc_b.findings)
+
+    def test_wording_never_asserts_what_the_business_offers(self):
+        loc = audit_location(_profile(
+            services=["Manicure"],
+            description="We mention nail art and shellac."))
+        coherence = [f for f in loc.findings
+                     if f.code in ("SEO-SERVICES-NOT-IN-DESCRIPTION",
+                                   "SEO-DESCRIPTION-SERVICE-NOT-LISTED")]
+        self.assertTrue(coherence, _codes(loc))
+        # The finding reports the cross-reference only; it never claims the shop
+        # offers/provides/serves the term.
+        for f in coherence:
+            text = f"{f.message} {f.evidence} {f.recommendation}".lower()
+            for phrase in (" offers", " provides", " serves", " our shop has",
+                           " the shop offers"):
+                self.assertNotIn(phrase, text, f.code)
+
+    def test_only_the_builtin_vocabulary_is_used(self):
+        # An unrelated word is not a known nail service and is never invented.
+        loc = audit_location(_profile(services=["Manicure"],
+                                      description="We sell gift cards and shampoo."))
+        self.assertNotIn("SEO-DESCRIPTION-SERVICE-NOT-LISTED", _codes(loc))
 
 
 class HoursTests(unittest.TestCase):
