@@ -240,6 +240,88 @@ class FieldPresenceTests(unittest.TestCase):
                           if rec["kind"] == "field"], [])
 
 
+class FullWeekHoursMidnightCloseTests(unittest.TestCase):
+    """Issue #101: full-week hours read a 00:00 close as the end of the day.
+
+    These mirror the audit's issue #98 cases (tests/test_seo_audit.py,
+    ``MidnightCloseTests``) so gap analysis and the audit can never disagree
+    about the same fixture.
+    """
+
+    def _hours(self, **overrides):
+        hours = _hours()
+        for day, value in overrides.items():
+            hours[day] = value
+        return hours
+
+    def _rate(self, target_hours, competitors=None):
+        report = analyze_gap(_target(hours=target_hours),
+                             _three_direct() if competitors is None else competitors)
+        return {row["field"]: row for row in report.field_presence}["full_week_hours"]
+
+    def test_one_day_closing_at_midnight_counts_toward_full_week(self):
+        # Previously 10:00-00:00 parsed as start 600 >= end 0, so the target was
+        # reported as missing full-week hours.
+        rate = self._rate(self._hours(saturday={"open": "10:00",
+                                                "close": "00:00"}))
+        self.assertTrue(rate["target_present"])
+        self.assertEqual(rate["present_count"], 2)
+        self.assertEqual(rate["competitor_share"], 67)
+
+    def test_all_seven_days_closing_at_midnight_are_full_week_hours(self):
+        hours = {day: {"open": "09:00", "close": "00:00"} for day in _WEEKDAYS}
+        self.assertTrue(self._rate(hours)["target_present"])
+
+    def test_open_at_0001_and_close_at_midnight_is_a_full_day(self):
+        # start > 0 is all the guard needs: 00:01-00:00 is a 23h59m window.
+        hours = {day: {"open": "09:00", "close": "00:00"} for day in _WEEKDAYS}
+        hours["wednesday"] = {"open": "00:01", "close": "00:00"}
+        self.assertTrue(self._rate(hours)["target_present"])
+
+    def test_missing_day_is_still_incomplete(self):
+        hours = {day: {"open": "09:00", "close": "00:00"} for day in _WEEKDAYS[:6]}
+        self.assertFalse(self._rate(hours)["target_present"])
+
+    def test_short_or_inverted_day_is_still_incomplete(self):
+        self.assertFalse(self._rate(self._hours(
+            monday={"open": "19:00", "close": "09:00"}))["target_present"])
+        self.assertFalse(self._rate(self._hours(
+            monday={"open": "09:00", "close": "09:00"}))["target_present"])
+
+    def test_midnight_to_midnight_is_still_incomplete(self):
+        # open == 00:00 is not "after midnight", so the rewrite must not fire.
+        self.assertFalse(self._rate(self._hours(
+            monday={"open": "00:00", "close": "00:00"}))["target_present"])
+
+    def test_general_overnight_window_is_still_out_of_scope(self):
+        self.assertFalse(self._rate(self._hours(
+            monday={"open": "22:00", "close": "02:00"}))["target_present"])
+
+    def test_malformed_hours_behaviour_is_unchanged(self):
+        for broken in ("00:0", "9:00", "", "24:00", "noon"):
+            with self.subTest(close=broken):
+                rate = self._rate(self._hours(
+                    monday={"open": "09:00", "close": broken}))
+                self.assertFalse(rate["target_present"])
+        self.assertFalse(self._rate(self._hours(
+            monday={"open": "09:00"}))["target_present"])
+        self.assertFalse(self._rate("not-a-mapping")["target_present"])
+
+    def test_gap_and_audit_agree_on_valid_hours(self):
+        cases = (
+            self._hours(),
+            self._hours(saturday={"open": "10:00", "close": "00:00"}),
+            {day: {"open": "09:00", "close": "00:00"} for day in _WEEKDAYS},
+        )
+        for hours in cases:
+            profile = _profile(hours=hours)
+            with self.subTest(hours=hours):
+                self.assertTrue(gap_mod._has_full_week_hours(profile))
+                codes = [finding.code for finding in
+                         audit_location(profile).findings]
+                self.assertNotIn("SEO-HOURS-INVALID-RANGE", codes)
+
+
 class SelectionTests(unittest.TestCase):
     def test_self_entry_is_excluded_by_resource_id(self):
         self_copy = _target()

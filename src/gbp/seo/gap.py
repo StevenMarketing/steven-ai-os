@@ -58,6 +58,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
 # drift apart.
 from .audit import (
     _DESCRIPTION_MIN,
+    _MINUTES_PER_DAY,
     _WEEKDAYS,
     _is_blank,
     _minutes,
@@ -169,7 +170,16 @@ def _median(values: Sequence[int]) -> Optional[Union[int, float]]:
 
 
 def _has_full_week_hours(profile: Dict[str, Any]) -> bool:
-    """True when hours cover all seven days with valid, ordered ``HH:MM``."""
+    """True when hours cover all seven days with valid, ordered ``HH:MM``.
+
+    A close of exactly ``00:00`` reads as ``24:00`` -- the end of the day, not
+    the start of it -- so ``09:00-00:00`` is a full day (issue #101). The rule is
+    deliberately identical to ``audit._check_hours`` (issue #98) so gap analysis
+    and the audit can never disagree about the same fixture: the rewrite only
+    applies when the open time is a real time after ``00:00`` and the close is
+    exactly midnight. ``00:00-00:00`` stays invalid (start is not after 00:00)
+    and general overnight windows such as ``22:00-02:00`` remain out of scope.
+    """
     hours = profile.get("hours")
     if not isinstance(hours, dict) or not hours:
         return False
@@ -179,6 +189,8 @@ def _has_full_week_hours(profile: Dict[str, Any]) -> bool:
             return False
         start = _minutes(str(value.get("open") or ""))
         end = _minutes(str(value.get("close") or ""))
+        if end == 0 and start is not None and start > 0:
+            end = _MINUTES_PER_DAY
         if start is None or end is None or start >= end:
             return False
     return True
