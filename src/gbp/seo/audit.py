@@ -34,6 +34,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 __all__ = [
     "ALLOWED_PRIMARY_CATEGORIES",
     "DISCLAIMER",
+    "NAIL_SERVICE_VOCABULARY",
     "PREFERRED_PRIMARY_CATEGORY",
     "REQUIRED_FIELDS",
     "SEVERITY_ORDER",
@@ -79,7 +80,15 @@ REQUIRED_FIELDS = (
     "services",
 )
 
+#: Severity ordering for the ``actions`` list, worst first. ``high`` before
+#: ``medium`` before ``low`` -- a documented convention of this module, not a
+#: Google metric.
 SEVERITY_ORDER: Dict[str, int] = {"high": 0, "medium": 1, "low": 2}
+#: Heuristic completeness-score penalty per finding, in descending steps
+#: (15 / 7 / 3). Basis: product scoring heuristic -- Google publishes no profile
+#: "score", so these weights are a deterministic, documented convention (see
+#: ``docs/SEO-AUDIT.md``) whose only job is to rank findings worst-first. They
+#: are not a Google ranking factor and imply no ranking outcome.
 _SEVERITY_WEIGHT: Dict[str, int] = {"high": 15, "medium": 7, "low": 3}
 
 #: Findings that are informational only and must NOT reduce the completeness
@@ -93,12 +102,27 @@ _NON_SCORING_CODES = frozenset({"SEO-IDENTITY-REUSED-NAME"})
 _WEEKDAYS = ("monday", "tuesday", "wednesday", "thursday", "friday",
              "saturday", "sunday")
 
+#: 24-hour ``HH:MM`` only -- the shape GBP hours use.
 _TIME_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
+#: North-American Numbering Plan shape (3-3-4). Basis: Google's content
+#: guidelines steer contact details into their dedicated fields, not the
+#: description, so a phone-shaped run inside the description is flagged.
 _PHONE_RE = re.compile(r"\b\d{3}[-.\s]?\d{3}[-.\s]?\d{4}\b")
+#: Any http(s):// or www. prefix. Basis: Google's content guidelines bar links
+#: from the description; the website belongs in the dedicated field.
 _URL_RE = re.compile(r"(https?://|www\.)", re.IGNORECASE)
 
+#: Google caps the GBP business description at 750 characters (documented field
+#: limit -- text beyond it is truncated) and shows roughly the first 250
+#: characters before truncating in search. 250 is therefore the practical
+#: minimum for a useful, non-truncated description; 750 is the hard maximum.
 _DESCRIPTION_MIN = 250
 _DESCRIPTION_MAX = 750
+#: Anti-keyword-stuffing heuristic. Google's guidelines forbid keyword stuffing
+#: but publish no repetition number, so this is a deliberately conservative,
+#: documented product heuristic: one content word is flagged only when it
+#: repeats at least 6 times AND is at least 6% of the content words, which
+#: ordinary prose does not reach.
 _STUFFING_MIN_REPEAT = 6
 _STUFFING_DENSITY = 0.06
 _STOPWORDS = frozenset({
@@ -106,6 +130,24 @@ _STOPWORDS = frozenset({
     "to", "in", "on", "at", "is", "are", "be", "it", "that", "this", "as",
     "by", "or", "from", "all", "any", "each", "we're", "us",
 })
+
+#: Small, hand-maintained vocabulary of well-known nail services. It exists ONLY
+#: to cross-reference a description against the services list -- matching is
+#: offline and deterministic (no ML, no network) and a match is never treated as
+#: proof that the business provides anything. Terms are lowercase phrases.
+NAIL_SERVICE_VOCABULARY: Tuple[str, ...] = (
+    "manicure",
+    "pedicure",
+    "gel nails",
+    "acrylic nails",
+    "nail art",
+    "gel polish",
+    "dip powder",
+    "shellac",
+    "french tips",
+    "nail extensions",
+    "spa pedicure",
+)
 
 
 def severity_rank(severity: str) -> int:
@@ -284,6 +326,41 @@ def _finding(code: str, severity: str, fld: str, message: str,
                    evidence=evidence, recommendation=recommendation)
 
 
+_WORD_RE = re.compile(r"[a-z0-9]+")
+
+
+def _stem(token: str) -> str:
+    """Conservative plural fold, used only for service/description matching.
+
+    ``nails`` -> ``nail`` and ``manicures`` -> ``manicure``; words that already
+    end in ``ss`` (e.g. ``glass``) are left unchanged so the rule stays simple
+    and deterministic.
+    """
+    if len(token) > 3 and token.endswith("s") and not token.endswith("ss"):
+        return token[:-1]
+    return token
+
+
+def _stems(text: Any) -> set:
+    """The set of folded word stems in ``text`` (for membership tests only)."""
+    return {_stem(t) for t in _WORD_RE.findall(str(text).lower())}
+
+
+def _phrase_stems(phrase: str) -> List[str]:
+    return [_stem(t) for t in _WORD_RE.findall(phrase.lower())]
+
+
+def _mentions(text_stems: Any, phrase: str) -> bool:
+    """True when every word of ``phrase`` appears among ``text_stems``.
+
+    Order is ignored; a phrase counts as present only when all of its tokens
+    are present, so a single shared generic word (e.g. ``nail``) does not make a
+    multi-word service (e.g. ``gel nails``) "present".
+    """
+    parts = _phrase_stems(phrase)
+    return bool(parts) and all(p in text_stems for p in parts)
+
+
 # --------------------------------------------------------------------------
 # individual checks (each returns a list of findings; pure + deterministic)
 # --------------------------------------------------------------------------
@@ -358,6 +435,11 @@ def _check_secondary_categories(profile: Dict[str, Any]) -> List[Finding]:
             evidence=primary,
             recommendation="Keep the primary category out of the secondary list."))
     unique = sorted(set(lowered))
+    # Basis: Google allows one primary plus up to 9 additional categories, but
+    # its guidance is to use the fewest that describe the core business, so a
+    # focused set of 3-5 secondaries is the practical target. OWNER DECISION
+    # (Steven, 2026-10-22): the > 5 rule stays a low-severity advisory and its
+    # behaviour is UNCHANGED -- this pass only records its basis in code.
     if len(unique) > 5:
         out.append(_finding(
             "SEO-SECONDARY-CATEGORIES-TOO-MANY", "low", "secondary_categories",
@@ -386,6 +468,9 @@ def _check_services(profile: Dict[str, Any]) -> List[Finding]:
             "Duplicate service entries.",
             evidence=", ".join(dupes),
             recommendation="Remove duplicate services."))
+    # Basis: a profile should name the shop's services; 3 is the documented
+    # practical minimum this module uses (below that the list cannot describe
+    # the shop). Google recommends listing every service the business sells.
     if len(set(lowered)) < 3:
         out.append(_finding(
             "SEO-SERVICES-TOO-FEW", "low", "services",
@@ -393,6 +478,54 @@ def _check_services(profile: Dict[str, Any]) -> List[Finding]:
             evidence=f"count={len(set(lowered))}",
             recommendation=("List at least three real services so customers can "
                             "see what the shop offers.")))
+    return out
+
+
+def _check_description_services_coherence(profile: Dict[str, Any]) -> List[Finding]:
+    """Deterministic cross-reference between the description and services list.
+
+    Two independent, purely offline checks:
+
+    * (a) a service is listed whose words never appear in the description;
+    * (b) a well-known nail term (from :data:`NAIL_SERVICE_VOCABULARY`) appears
+      in the description but not in the services list.
+
+    Findings report only the cross-reference result and quote the matched terms;
+    they never assert what the business actually offers, and they invent no
+    service or category. The check is skipped when either side is missing --
+    that case belongs to the completeness check.
+    """
+    try:
+        services = _as_list(profile.get("services"))
+    except ValueError:
+        return []  # malformed services already reported by _check_services
+    raw = profile.get("description")
+    if not services or raw is None or not str(raw).strip():
+        return []
+
+    desc_stems = _stems(raw)
+    service_stems = _stems(" ".join(services))
+
+    out: List[Finding] = []
+    for service in sorted(services, key=lambda s: (s.lower(), s)):
+        if not _mentions(desc_stems, service):
+            out.append(_finding(
+                "SEO-SERVICES-NOT-IN-DESCRIPTION", "low", "services",
+                "A listed service is not mentioned in the description.",
+                evidence=f"service={service!r} not mentioned in description",
+                recommendation=("Mention the service in the description, or "
+                                "drop it from the services list, so the two "
+                                "fields agree.")))
+    missing_terms = sorted(
+        term for term in NAIL_SERVICE_VOCABULARY
+        if _mentions(desc_stems, term) and not _mentions(service_stems, term))
+    for term in missing_terms:
+        out.append(_finding(
+            "SEO-DESCRIPTION-SERVICE-NOT-LISTED", "low", "description",
+            "The description mentions a nail service the services list omits.",
+            evidence=f"description term={term!r} not in services list",
+            recommendation=("Add the service to the services list, or reword "
+                            "the description so it does not imply it.")))
     return out
 
 
@@ -431,6 +564,8 @@ def _check_description(profile: Dict[str, Any]) -> List[Finding]:
             evidence=_URL_RE.search(text).group(0),
             recommendation=("Remove links from the description; use the website "
                             "field instead.")))
+    # Guard: require at least 20 letters so short labels or abbreviations are
+    # not misjudged, and treat > 50% uppercase as "mostly upper case".
     letters = [c for c in text if c.isalpha()]
     if len(letters) >= 20 and sum(1 for c in letters if c.isupper()) / len(letters) > 0.5:
         out.append(_finding(
@@ -438,6 +573,8 @@ def _check_description(profile: Dict[str, Any]) -> List[Finding]:
             "Description is written mostly in upper case.",
             evidence=f"uppercase_ratio>0.5 across {len(letters)} letters",
             recommendation="Rewrite in sentence case; shouting reads as spam."))
+    # Ignore stopwords and 1-2 character tokens so they cannot dominate the
+    # repetition/density heuristic (see _STUFFING_* above).
     words = [w for w in re.findall(r"[a-z0-9']+", text.lower())
              if w not in _STOPWORDS and len(w) > 2]
     if words:
@@ -521,6 +658,7 @@ def audit_location(profile: Dict[str, Any]) -> LocationAudit:
     findings += _check_secondary_categories(profile)
     findings += _check_services(profile)
     findings += _check_description(profile)
+    findings += _check_description_services_coherence(profile)
     findings += _check_hours(profile)
     return LocationAudit(
         location_name=_norm(profile.get("location_name")),

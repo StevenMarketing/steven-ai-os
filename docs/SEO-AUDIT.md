@@ -21,6 +21,7 @@ Implementation: `src/gbp/seo/audit.py` · Tests: `tests/test_seo_audit.py`.
 | Secondary categories | `SEO-SECONDARY-CATEGORIES-EMPTY`, `-DUPLICATE`, `-OVERLAP-PRIMARY`, `-TOO-MANY` | |
 | Services | `SEO-SERVICES-DUPLICATE`, `SEO-SERVICES-TOO-FEW` | |
 | Description | `SEO-DESCRIPTION-TOO-SHORT`, `-TOO-LONG`, `-PHONE`, `-URL`, `-ALL-CAPS`, `-KEYWORD-STUFFING` | flags stuffing rather than encouraging it |
+| Description <-> services coherence | `SEO-SERVICES-NOT-IN-DESCRIPTION`, `SEO-DESCRIPTION-SERVICE-NOT-LISTED` | deterministic cross-reference (`low`); quotes the matched terms and never asserts what the business offers |
 | Hours | `SEO-HOURS-DAY-MISSING`, `-MALFORMED`, `-INVALID-RANGE`, `-ALL-CLOSED` | |
 | Identity (cross-location) | `SEO-IDENTITY-REUSED-NAME`, `SEO-IDENTITY-DUPLICATE-NAME-ZIP` | mirrors the dashboard convention: name + ZIP |
 | Malformed input | `SEO-PROFILE-MALFORMED` | a wrong-typed field is reported, never invented |
@@ -36,6 +37,28 @@ for a chain) is still reported and still appears in the actions list, but its
 penalty is excluded from the score. The probable-duplicate
 `SEO-IDENTITY-DUPLICATE-NAME-ZIP` keeps its full `high` penalty. The exclusion is
 declared once in `_NON_SCORING_CODES` in `src/gbp/seo/audit.py`.
+
+## Rule basis (issue #86)
+
+Every numeric threshold in `src/gbp/seo/audit.py` carries an in-code comment
+stating its basis. Inventory:
+
+| Threshold | Value | Basis |
+|---|---|---|
+| Description minimum | `_DESCRIPTION_MIN = 250` | Google shows roughly the first 250 characters of the description before truncating in search, so 250 is the practical minimum for a useful, non-truncated description. |
+| Description maximum | `_DESCRIPTION_MAX = 750` | Documented GBP business-description field limit (hard cap; text beyond it is truncated). |
+| Keyword-stuffing repeat / density | `_STUFFING_MIN_REPEAT = 6`, `_STUFFING_DENSITY = 0.06` | Product heuristic: Google forbids keyword stuffing but publishes no number; a word is flagged only at >= 6 repeats **and** >= 6% of content words. |
+| Secondary categories "too many" | `> 5` unique | Google allows one primary plus up to 9 additional categories but recommends the fewest that describe the business; 3–5 focused secondaries is the target. **Owner decision (Steven, 2026-10-22): rule kept as-is (`low`, scoring); this pass only records its basis.** |
+| Services "too few" | `< 3` unique | Practical minimum for the services list to describe the shop; Google recommends listing every service sold. |
+| All-caps guard | `>= 20` letters, `> 50%` upper | Requires enough letters to judge, and treats a strict majority upper-case as "mostly upper case". |
+| Severity weights | `15 / 7 / 3` | Product scoring convention only — Google publishes no profile score; the weights rank findings, they are not a ranking factor. |
+| Phone / URL / time shapes | NANP 3-3-4, `http(s)://`/`www.`, `HH:MM` | Google's content guidelines keep contact details and links out of the description; hours are 24-hour `HH:MM`. |
+
+The description/services coherence check is offline and deterministic: it folds
+plurals ("manicures" ~ "Manicure") and matches against a small built-in
+`NAIL_SERVICE_VOCABULARY`. It reports only the cross-reference result and quotes
+the matched terms; it never asserts what the business offers and invents no
+service or category.
 
 ## Multi-location identity
 
@@ -68,14 +91,14 @@ Example (synthetic demo account, trimmed):
   "source": "synthetic-fixture",
   "disclaimer": "Offline audit of synthetic Google Business Profile fixtures. ...",
   "location_count": 2,
-  "total_findings": 12,
+  "total_findings": 13,
   "duplicate_names": {
     "demo nails": ["accounts/1001/locations/loc-001", "accounts/1001/locations/loc-002"]
   },
   "locations": [
     {
       "location_name": "accounts/1001/locations/loc-002",
-      "score": 38,
+      "score": 35,
       "highest_severity": "medium",
       "findings": [
         {
@@ -98,11 +121,11 @@ Example (synthetic demo account, trimmed):
 cd /opt/data/gbp-integration && PYTHONPATH=src python3 -m unittest tests.test_seo_audit
 ```
 
-34 tests: completeness, categories/services, description, hours, duplicate
-name/ZIP, reused-name non-scoring behaviour, empty and malformed fixtures,
-deterministic JSON, prioritised actions, deep-copy fixtures, and an explicit
-**no-network guard** (sockets patched to raise and a source scan for network
-imports).
+42 tests: completeness, categories/services, description, hours, duplicate
+name/ZIP, reused-name non-scoring behaviour, description <-> services coherence,
+empty and malformed fixtures, deterministic JSON, prioritised actions, deep-copy
+fixtures, and an explicit **no-network guard** (sockets patched to raise and a
+source scan for network imports).
 
 ## Limits (by design)
 
