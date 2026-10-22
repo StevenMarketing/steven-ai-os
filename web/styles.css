@@ -1,10 +1,11 @@
 /* Steven AI OS — Google Reviews Manager : design system + app shell (Group 7 / T18).
  *
  * Light, modern SaaS admin theme. Issue #93 visual pass: a friendly, colourful
- * management-panel feel built on a signature violet primary family (hPanel
- * purple), a lavender-tinted canvas, white cards with generous rounding and
- * soft layered shadows, icon-forward navigation, and a violet→magenta accent
- * gradient used SPARINGLY (primary CTA, key stat chip, banner edge).
+ * management-panel feel built on the Adzdigital brand family (azure #009ffd ->
+ * violet #963df1), a deep-indigo sidebar (owner dashboard mockup), an
+ * azure-tinted canvas, white cards with generous rounding and soft layered
+ * shadows, icon-forward navigation, and an azure→violet accent gradient used
+ * SPARINGLY (primary CTA, key stat chip, banner edge).
  *
  * Plain CSS, no framework, no build step.
  * NO external fonts / CDN — system font stack only. Icons are inline SVG.
@@ -20,30 +21,30 @@
 /* ------------------------------------------------------------------ */
 :root {
   /* colour — AA contrast on white / on tint (body-text pairs >= 4.5:1) */
-  --bg: #f7f6fd;           /* light lavender-tinted canvas */
-  --bg-sunken: #ecebf8;
+  --bg: #f5f8fd;           /* light azure-tinted canvas */
+  --bg-sunken: #e8eefb;
   --panel: #ffffff;
-  --panel-2: #f9f8fe;
-  --ink: #1d1a33;          /* dark purple-navy body ink (16.8:1 on white) */
-  --ink-soft: #3c3663;
-  --muted: #5b5480;        /* 6.9:1 on white */
-  --faint: #7a739c;        /* 4.4:1 on white — decorative / small print only */
-  --line: #e7e4f4;
-  --line-strong: #d5d0ec;
+  --panel-2: #f7faff;
+  --ink: #14264d;          /* deep navy body ink */
+  --ink-soft: #2c4470;
+  --muted: #4d5f85;
+  --faint: #71809e;
+  --line: #dfe7f5;
+  --line-strong: #c3d2ec;
 
-  /* signature violet primary family */
-  --brand: #673de6;
-  --brand-ink: #5025d5;    /* deep violet — 8.2:1 on white */
-  --brand-tint: #f0ecfe;
-  --brand-tint-2: #e4dcfd;
-  --brand-ring: #c9bcfb;
+  /* signature primary family — Adzdigital brand (azure -> violet) */
+  --brand: #963df1;
+  --brand-ink: #6d28c9;
+  --brand-tint: #eef3fe;
+  --brand-tint-2: #e2e9fd;
+  --brand-ring: #b7cdf8;
 
-  /* accent gradient (violet -> magenta) — use SPARINGLY */
-  --accent-1: #673de6;
-  --accent-2: #8a3fdc;
-  --accent-3: #b13bd6;
+  /* accent gradient (azure -> violet) — use SPARINGLY */
+  --accent-1: #009ffd;
+  --accent-2: #4f6df5;
+  --accent-3: #963df1;
   --grad: linear-gradient(135deg, var(--accent-1) 0%, var(--accent-2) 58%, var(--accent-3) 100%);
-  --grad-deep: linear-gradient(135deg, #3a1d80 0%, #5025d5 55%, #8a2fbe 100%);
+  --grad-deep: linear-gradient(135deg, #001949 0%, #0d3686 55%, #5b21b6 100%);
 
   /* semantic status — friendlier tints; meaning is never colour-alone */
   --ok: #146c37;
@@ -55,7 +56,7 @@
   --danger: #b4232e;
   --danger-tint: #fdecea;
   --danger-line: #f4c6c3;
-  --focus: #5025d5;
+  --focus: #6d28c9;
 
   /* spacing scale (4px base) */
   --sp-1: 4px;
@@ -130,7 +131,7 @@ body {
 /* ------------------------------------------------------------------ */
 .banner {
   background: var(--grad-deep);
-  background-color: #5025d5;
+  background-color: #001949;
   color: #ffffff;
   text-align: center;
   font-weight: 700;
@@ -154,8 +155,8 @@ body {
   left: 0;
   bottom: 0;
   width: var(--sidebar-w);
-  background: var(--panel);
-  border-right: 1px solid var(--line);
+  background: linear-gradient(180deg, #001949, #1b2f65);
+  border-right: 1px solid rgba(255, 255, 255, 0.10);
   box-shadow: var(--sh-1);
   display: flex;
   flex-direction: column;
@@ -170,7 +171,7 @@ body {
   align-items: center;
   gap: var(--sp-3);
   padding: var(--sp-1) var(--sp-2) var(--sp-5);
-  border-bottom: 1px solid var(--line);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.12);
   margin-bottom: var(--sp-2);
 }
 .brand-mark {
@@ -185,11 +186,11 @@ body {
   box-shadow: var(--sh-2);
 }
 .brand-text { display: flex; flex-direction: column; }
-.brand-title { font-weight: 700; font-size: var(--fs-17); letter-spacing: -0.01em; color: var(--ink); }
+.brand-title { font-weight: 700; font-size: var(--fs-17); letter-spacing: -0.01em; color: #ffffff; }
 .brand-sub {
   font-size: var(--fs-11);
   font-weight: 600;
-  color: var(--muted);
+  color: #b9cdf0;
   text-transform: uppercase;
   letter-spacing: 0.08em;
 }
@@ -207,7 +208,7 @@ body {
   padding: var(--sp-2) var(--sp-3);
   border: 1px solid transparent;
   background: transparent;
-  color: var(--ink-soft);
+  color: #dbe6ff;
   border-radius: var(--r-pill);
   cursor: pointer;
   font: inherit;
@@ -216,23 +217,23 @@ body {
   text-align: left;
   transition: background-color 0.15s ease, color 0.15s ease;
 }
-.tab svg { flex: 0 0 auto; color: var(--muted); }
-.tab:hover { background: var(--brand-tint); color: var(--brand-ink); }
-.tab:hover svg { color: var(--brand); }
-/* the active item is a filled violet pill with white text */
+.tab svg { flex: 0 0 auto; color: #9db6e6; }
+.tab:hover { background: rgba(255, 255, 255, 0.08); color: #ffffff; }
+.tab:hover svg { color: #ffffff; }
+/* the active item is a clearly visible azure pill with white text */
 .tab.active {
-  background: var(--brand);
-  border-color: var(--brand);
+  background: rgba(0, 159, 253, 0.25);
+  border-color: rgba(0, 159, 253, 0.55);
   color: #ffffff;
   font-weight: 600;
-  box-shadow: 0 4px 12px rgba(103, 61, 230, 0.32);
+  box-shadow: 0 4px 12px rgba(0, 25, 73, 0.45);
 }
 .tab.active svg { color: #ffffff; }
 
 .nav-bottom {
   margin-top: auto;
   padding-top: var(--sp-4);
-  border-top: 1px solid var(--line);
+  border-top: 1px solid rgba(255, 255, 255, 0.12);
   display: flex;
   flex-direction: column;
   gap: var(--sp-1);
@@ -244,7 +245,7 @@ body {
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.1em;
-  color: var(--faint);
+  color: #9db6e6;
   padding: 0 var(--sp-3) var(--sp-2);
 }
 .nav-sub {
@@ -256,7 +257,7 @@ body {
   padding: var(--sp-2) var(--sp-3);
   border: 1px solid transparent;
   background: transparent;
-  color: var(--ink-soft);
+  color: #dbe6ff;
   border-radius: var(--r-pill);
   cursor: pointer;
   font: inherit;
@@ -264,24 +265,24 @@ body {
   text-align: left;
   transition: background-color 0.15s ease, color 0.15s ease;
 }
-.nav-sub:hover { background: var(--brand-tint); color: var(--brand-ink); }
-.nav-sub svg { flex: 0 0 auto; color: var(--muted); }
-.nav-sub:hover svg { color: var(--brand); }
+.nav-sub:hover { background: rgba(255, 255, 255, 0.08); color: #ffffff; }
+.nav-sub svg { flex: 0 0 auto; color: #9db6e6; }
+.nav-sub:hover svg { color: #ffffff; }
 /* the state dot sits at the right edge as a plain status indicator */
 .nav-sub .dot { margin-left: auto; }
 .nav-sub.active svg { color: #ffffff; }
 .nav-sub.active .dot { background: #ffffff; }
 .nav-sub.active {
-  background: var(--brand);
-  border-color: var(--brand);
+  background: rgba(0, 159, 253, 0.25);
+  border-color: rgba(0, 159, 253, 0.55);
   color: #ffffff;
   font-weight: 600;
-  box-shadow: 0 4px 12px rgba(103, 61, 230, 0.32);
+  box-shadow: 0 4px 12px rgba(0, 25, 73, 0.45);
 }
 .app-version {
   margin: var(--sp-3) var(--sp-3) 0;
   font-size: var(--fs-11);
-  color: var(--faint);
+  color: #9db6e6;
   font-family: var(--mono);
 }
 
@@ -441,7 +442,7 @@ code { font-family: var(--mono); font-size: 0.92em; background: var(--brand-tint
 .skeleton { display: flex; flex-direction: column; gap: var(--sp-2); padding: var(--sp-4) 0; }
 .skeleton-row {
   height: 14px; border-radius: var(--r-pill);
-  background: linear-gradient(90deg, var(--bg-sunken) 25%, #e0dbf6 37%, var(--bg-sunken) 63%);
+  background: linear-gradient(90deg, var(--bg-sunken) 25%, #dbe7fa 37%, var(--bg-sunken) 63%);
   background-size: 400% 100%;
   animation: shimmer 1.3s ease-in-out infinite;
 }
@@ -508,7 +509,7 @@ code { font-family: var(--mono); font-size: 0.92em; background: var(--brand-tint
   cursor: pointer;
   font: inherit;
   font-weight: 600;
-  box-shadow: 0 4px 12px rgba(103, 61, 230, 0.28);
+  box-shadow: 0 4px 12px rgba(150, 61, 241, 0.28);
 }
 .filters button#f-reset { background: var(--panel); color: var(--ink-soft); border-color: var(--line-strong); font-weight: 500; box-shadow: none; }
 .filters button#f-reset:hover { border-color: var(--brand-ring); color: var(--brand-ink); }
@@ -528,9 +529,9 @@ button.primary {
   cursor: pointer;
   font: inherit;
   font-weight: 600;
-  box-shadow: 0 5px 14px rgba(103, 61, 230, 0.3);
+  box-shadow: 0 5px 14px rgba(150, 61, 241, 0.3);
 }
-button.primary:disabled { background: #cdc3f2; border-color: #cdc3f2; color: #ffffff; box-shadow: none; cursor: not-allowed; }
+button.primary:disabled { background: #b9ccf2; border-color: #b9ccf2; color: #ffffff; box-shadow: none; cursor: not-allowed; }
 
 .notice {
   border: 1px solid var(--line);
