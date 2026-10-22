@@ -1509,6 +1509,25 @@ def make_handler(
                         rows = [r for r in rows
                                 if str(_audit_row_location(service.repo, r)) in visible]
                 return 200, rows
+            if path == "/api/seo/audit":
+                # READ-ONLY, offline SEO audit preview (issue #42). The report is
+                # produced by the issue #39 audit engine on synthetic fixtures --
+                # no audit logic lives here, no Google call is made, no profile
+                # is edited. ``dataset`` selects a deterministic fixture set
+                # (default/incomplete/hostile/empty/error) so the dashboard can
+                # show its empty and error states on purpose.
+                from gbp.seo.preview import DemoError, PreviewError, build_preview
+
+                dataset = (_first(query, "dataset") or "default").strip()
+                try:
+                    return 200, build_preview(dataset=dataset)
+                except PreviewError as exc:
+                    return _err(400, "invalid_request",
+                                detail=f"invalid dataset: {exc}")
+                except DemoError as exc:
+                    # A deliberate, documented failure used by the preview to
+                    # exercise its error state. Nothing is broken.
+                    return _err(503, "demo_error", detail=str(exc))
             return _err(404, "not_found", detail=f"no route for GET {path}")
 
         def _route_post(

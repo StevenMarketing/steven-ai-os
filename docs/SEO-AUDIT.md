@@ -127,6 +127,31 @@ empty and malformed fixtures, deterministic JSON, prioritised actions, deep-copy
 fixtures, and an explicit **no-network guard** (sockets patched to raise and a
 source scan for network imports).
 
+## Dashboard preview (issue #42)
+
+A read-only, offline, mobile-friendly preview of the audit lives inside the
+existing web dashboard: the **SEO Audit** panel (`area=seo`, a nav-sub entry
+next to *Business Dashboard* — the primary nav keeps its 8 tabs).
+
+* `src/gbp/seo/preview.py` is a thin **view model** on top of this engine: it
+  calls `audit_profiles` and re-shapes the report into per-salon cards. No audit
+  logic is re-implemented there.
+* `GET /api/seo/audit?dataset=<name>` serves it. Datasets are deterministic
+  fixtures: `default`, `incomplete` (missing fields), `hostile` (markup in text,
+  to prove escaping), `empty` and `error` (a deliberate 503 that exercises the
+  UI error state). An unknown dataset is a `400`.
+* Per salon the preview shows the **completeness score** — labelled exactly
+  `completeness score (heuristic)`, never a ranking score — the missing required
+  fields, and the prioritized findings with evidence and a suggested action,
+  with **categories kept visually separate from services**. A visible banner
+  states there is no live Google connectivity.
+* Multi-location identity is the shared one: the business selector lists every
+  salon as `name · ZIP · resource id`, so two same-name shops stay distinct.
+* The renderer writes every dynamic value with `textContent` (no HTML sink), so
+  fixture markup is displayed literally and can never execute.
+
+Tests: `tests/test_seo_dashboard.py`.
+
 ## Limits (by design)
 
 * No live GBP connectivity, no OAuth, no Google API, no paid service.
