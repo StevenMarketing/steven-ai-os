@@ -81,6 +81,31 @@ class CompletenessTests(unittest.TestCase):
                             for f in loc.findings if f.code == "SEO-MISSING-FIELD"))
         self.assertEqual(loc.highest_severity, "high")
 
+    def test_whitespace_only_list_field_is_flagged_like_missing(self):
+        # Regression for issue #39: a required list field whose items are all
+        # blank is empty once normalized and must be flagged exactly like [].
+        for services in (["   "], [""], ["", "  "], ["\t"]):
+            with self.subTest(services=services):
+                loc = audit_location(_profile(services=services))
+                missing = [f.field for f in loc.findings
+                           if f.code == "SEO-MISSING-FIELD"]
+                self.assertIn("services", missing, _codes(loc))
+                self.assertTrue(all(f.severity == "high"
+                                    for f in loc.findings
+                                    if f.code == "SEO-MISSING-FIELD"))
+                self.assertEqual(loc.highest_severity, "high")
+
+    def test_blank_only_services_match_empty_list_behaviour(self):
+        # Before the fix services=['   '] produced ZERO findings and score 100,
+        # while services=[] was flagged. The two must now be indistinguishable.
+        empty = audit_location(_profile(services=[]))
+        for services in (["   "], [""]):
+            with self.subTest(services=services):
+                blank = audit_location(_profile(services=services))
+                self.assertEqual(_codes(empty), _codes(blank))
+                self.assertEqual(empty.score, blank.score)
+                self.assertNotEqual(blank.score, 100)
+
 
 class CategoryAndServiceTests(unittest.TestCase):
     def test_primary_category_off_and_suboptimal(self):

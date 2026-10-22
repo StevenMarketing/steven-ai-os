@@ -238,6 +238,24 @@ def _as_list(value: Any) -> List[str]:
     return out
 
 
+def _is_blank(value: Any) -> bool:
+    """True when a required field carries no usable (normalized) content.
+
+    Emptiness is judged on normalized content, not raw truthiness: a list or
+    tuple whose items are all blank (e.g. ``['']`` or ``['   ']``) is empty,
+    exactly like ``[]``.
+    """
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return not value.strip()
+    if isinstance(value, (list, tuple)):
+        return not _as_list(value)
+    if isinstance(value, dict):
+        return not value
+    return False
+
+
 def _minutes(hhmm: str) -> Optional[int]:
     match = _TIME_RE.match(_norm(hhmm))
     if not match:
@@ -258,8 +276,7 @@ def _check_completeness(profile: Dict[str, Any]) -> List[Finding]:
     out: List[Finding] = []
     for name in REQUIRED_FIELDS:
         value = profile.get(name)
-        if value is None or (isinstance(value, str) and not value.strip()) \
-                or (isinstance(value, (list, tuple, dict)) and not value):
+        if _is_blank(value):
             out.append(_finding(
                 "SEO-MISSING-FIELD", "high", name,
                 f"Required profile field '{name}' is missing or empty.",
