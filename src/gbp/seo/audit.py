@@ -104,6 +104,9 @@ _WEEKDAYS = ("monday", "tuesday", "wednesday", "thursday", "friday",
 
 #: 24-hour ``HH:MM`` only -- the shape GBP hours use.
 _TIME_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
+#: Minutes in a day: a close of ``00:00`` is read as ``24:00`` (midnight at the
+#: end of the day, not the start). See ``_check_hours`` for the exact rule.
+_MINUTES_PER_DAY = 24 * 60
 #: North-American Numbering Plan shape (3-3-4). Basis: Google's content
 #: guidelines steer contact details into their dedicated fields, not the
 #: description, so a phone-shaped run inside the description is flagged.
@@ -627,6 +630,18 @@ def _check_hours(profile: Dict[str, Any]) -> List[Finding]:
         checked += 1
         start = _minutes(str(value.get("open") or ""))
         end = _minutes(str(value.get("close") or ""))
+        # Midnight close (issue #98): ``00:00`` on the close side means the end
+        # of the day (24:00), not the start of it, so a shop open 09:00-00:00
+        # closes at midnight rather than having an inverted range. The rewrite
+        # applies ONLY when the open time is a real time after 00:00 (start > 0)
+        # and the close is exactly midnight, so:
+        #   * 09:00-00:00 -> close read as 1440, valid (no finding);
+        #   * 00:00-00:00 -> start == 0, unchanged, still an invalid range;
+        #   * 19:00-09:00 -> unchanged, still an invalid range;
+        #   * 22:00-02:00 -> unchanged, still an invalid range: general overnight
+        #     windows are a separate owner decision and deliberately OUT of scope.
+        if end == 0 and start is not None and start > 0:
+            end = _MINUTES_PER_DAY
         if start is None or end is None:
             out.append(_finding("SEO-HOURS-MALFORMED", "medium", "hours",
                                 f"Unparseable time for {day}.",

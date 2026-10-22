@@ -279,6 +279,69 @@ class HoursTests(unittest.TestCase):
         self.assertIn("SEO-HOURS-ALL-CLOSED", _codes(loc))
 
 
+class MidnightCloseTests(unittest.TestCase):
+    """Issue #98: a 00:00 close is midnight at the end of the day, not 00:00."""
+
+    def test_one_day_closing_at_midnight_scores_100(self):
+        # A perfect profile where a single day closes at midnight must not be
+        # flagged SEO-HOURS-INVALID-RANGE (previously scored 93, not 100).
+        hours = {day: {"open": "09:00", "close": "19:00"} for day in seo._WEEKDAYS}
+        hours["saturday"] = {"open": "10:00", "close": "00:00"}
+        loc = audit_location(_profile(hours=hours))
+        self.assertEqual(loc.findings, [], _codes(loc))
+        self.assertNotIn("SEO-HOURS-INVALID-RANGE", _codes(loc))
+        self.assertEqual(loc.score, 100)
+
+    def test_all_seven_days_closing_at_midnight_score_100(self):
+        hours = {day: {"open": "09:00", "close": "00:00"} for day in seo._WEEKDAYS}
+        loc = audit_location(_profile(hours=hours))
+        self.assertEqual(loc.findings, [], _codes(loc))
+        self.assertEqual(loc.score, 100)
+
+    def test_open_at_0001_and_close_at_midnight_is_valid(self):
+        # start > 0 is all the guard needs: 00:01-00:00 is a 23h59m window.
+        hours = {day: {"open": "09:00", "close": "00:00"} for day in seo._WEEKDAYS}
+        hours["wednesday"] = {"open": "00:01", "close": "00:00"}
+        loc = audit_location(_profile(hours=hours))
+        self.assertEqual(loc.findings, [], _codes(loc))
+        self.assertEqual(loc.score, 100)
+
+    def test_inverted_range_still_flagged(self):
+        hours = {day: {"open": "09:00", "close": "19:00"} for day in seo._WEEKDAYS}
+        hours["monday"] = {"open": "19:00", "close": "09:00"}
+        loc = audit_location(_profile(hours=hours))
+        self.assertIn("SEO-HOURS-INVALID-RANGE", _codes(loc))
+
+    def test_open_equals_close_still_flagged(self):
+        hours = {day: {"open": "09:00", "close": "19:00"} for day in seo._WEEKDAYS}
+        hours["monday"] = {"open": "09:00", "close": "09:00"}
+        loc = audit_location(_profile(hours=hours))
+        self.assertIn("SEO-HOURS-INVALID-RANGE", _codes(loc))
+
+    def test_midnight_to_midnight_still_flagged(self):
+        # open == 00:00 is NOT "after midnight": the rewrite must not fire.
+        hours = {day: {"open": "09:00", "close": "19:00"} for day in seo._WEEKDAYS}
+        hours["monday"] = {"open": "00:00", "close": "00:00"}
+        loc = audit_location(_profile(hours=hours))
+        self.assertIn("SEO-HOURS-INVALID-RANGE", _codes(loc))
+
+    def test_general_overnight_window_still_flagged(self):
+        # Explicitly OUT of scope: only a 00:00 close is special-cased, so a
+        # 22:00-02:00 window keeps its invalid-range finding.
+        hours = {day: {"open": "09:00", "close": "19:00"} for day in seo._WEEKDAYS}
+        hours["monday"] = {"open": "22:00", "close": "02:00"}
+        loc = audit_location(_profile(hours=hours))
+        self.assertIn("SEO-HOURS-INVALID-RANGE", _codes(loc))
+
+    def test_malformed_close_is_unchanged(self):
+        hours = {day: {"open": "09:00", "close": "19:00"} for day in seo._WEEKDAYS}
+        hours["monday"] = {"open": "09:00", "close": "00:0"}
+        loc = audit_location(_profile(hours=hours))
+        codes = _codes(loc)
+        self.assertIn("SEO-HOURS-MALFORMED", codes)
+        self.assertNotIn("SEO-HOURS-INVALID-RANGE", codes)
+
+
 class IdentityTests(unittest.TestCase):
     def test_same_name_distinct_zip_stays_separate(self):
         profiles = [
