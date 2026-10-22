@@ -33,7 +33,7 @@ The machine-readable copy of this table lives in
 | `average_position` | arithmetic mean of the **non-null** positions only (3 decimals); `None` when the period has no position at all. An "outside top 20" week is never counted as a number. |
 | `best_position` / `worst_position` | smallest / largest non-null position; `None` when there is none. |
 | `top_3_share` / `top_10_share` | share of **all** observations in the period whose non-null position is `<= 3` / `<= 10` (3 decimals). Null weeks are in the denominator, so a share cannot be inflated by dropping the weeks the salon was invisible. |
-| `week_over_week` | for each pair of **consecutive ISO weeks present in the period**: `delta = average_position(later) - average_position(earlier)` (3 decimals), plus `direction` = `improved` / `worsened` / `flat`. **Negative delta means the average position number fell, i.e. the salon moved up.** A week whose average is `None` yields a `None` delta with `direction: "unknown"` and is listed, never dropped. |
+| `week_over_week` | for each pair of **consecutive ISO weeks present in the period**: `delta = average_position(later) - average_position(earlier)` (3 decimals), plus `direction` = `improved` / `worsened` / `flat`. **Negative delta means the average position number fell, i.e. the salon moved up.** A week whose average is `None` yields a `None` delta with `direction: "unknown"` and is listed, never dropped. Two weeks that are present but **not** consecutive ISO weeks (a missing week between them) yield `delta: null` with `direction: "gap"` -- a gap is never presented as a week-over-week change (issue #92). |
 | `visibility_index` | **INTERNAL index -- not a Google metric.** Per keyword, score each observation `max(0, 21 - position) / 20` and each null week `0`, then average over that keyword's observations; the index is the **mean of those per-keyword averages** (4 decimals), so every keyword counts once whatever its number of weeks. `None` for an empty period. Position 1 scores `1.0`, position 20 scores `0.05`, "outside top 20" scores `0`. |
 
 The visibility index is always emitted next to
@@ -52,12 +52,24 @@ RankObservation(location_id, keyword, week, position, source="simulated")
   value in the message.
 * `week` is an ISO week label `YYYY-Www` (`parse_week` / `week_label` /
   `next_week` / `iso_week_range` are provided; `next_week` is correct across
-  year boundaries: `2020-W53 -> 2021-W01`).
+  year boundaries: `2020-W53 -> 2021-W01`). Since issue #92 the label is
+  validated **strictly**: the whole string must be ASCII `YYYY-Www` (a trailing
+  newline, a space or non-ASCII digits such as `٢٠٢٦-W40` / `２０２６-W40` are
+  refused) and the pair must be a **real** ISO calendar week
+  (`date.fromisocalendar`), so `2025-W53` (2025 has 52 ISO weeks) and
+  `0000-W01` are refused while `2020-W53` and `2026-W53` are accepted.
 * `source` must be exactly `"simulated"`. `"scraped"`, `"local-rank-grid"`,
   `"SIMULATED"`, `" simulated "` and `None` are all refused.
 * `(location_id, keyword, week)` is the key. A second observation for the same
-  cell is refused by `RankSeries.add` (`duplicate (location_id, keyword, week)`),
-  because two readings of one cell in one ISO week cannot both be true.
+  cell is refused everywhere (`duplicate (location_id, keyword, week)`): by
+  `RankSeries.add` **and**, since issue #92, by every public metric / summary
+  entry point through the shared input normalization -- `coverage`,
+  `average_position`, `best_position`, `worst_position`, `top_share`,
+  `week_over_week`, `visibility_by_keyword`, `visibility_index`,
+  `summarize_location` -- for a list, a tuple, a generator or a series alike.
+  Duplicates are **never** silently averaged or deduplicated: duplicate rank
+  `1` + rank `20` for one cell raises instead of reporting `average_position =
+  10.5`. Two readings of one cell in one ISO week cannot both be true.
 
 ## The seeded generator
 
@@ -138,8 +150,9 @@ locations (`loc-001`, `loc-002`) and three keywords (`nail salon`,
 ```
 
 (Abridged: the real summary carries all seven `week_over_week` rows and the
-metric definitions. For this fixture it is 4 728 bytes, and `to_json()` is
-byte-identical across runs.)
+metric definitions. For this fixture it is 4 880 bytes, and `to_json()` is
+byte-identical across runs. The fixture's weeks are consecutive, so none of its
+rows is a gap: issue #92 leaves every number above untouched.)
 
 ## Hand-computed fixture evidence
 
@@ -175,11 +188,16 @@ These exact numbers are asserted in `tests/test_seo_ranking.py`
 ```
 simulate_dataset().to_json()   14 800 bytes
   sha256 ef8919052c6376bafaadd9cae38fbdee12b9792808855afa82ed957b7e927c0e
-summarize_series(series).to_json()  13 276 bytes
-  sha256 7b39f008c90bd8b49c38eddc19914cdbf8edc6bf85a5d5b73650a80484e3da10
-summary(loc-001).to_json()      4 728 bytes
-  sha256 bd9f458ba175f2c118f3d03bbfa0cf15f864513dcb385857aeab1f9156bb33bf
+summarize_series(series).to_json()  13 732 bytes
+  sha256 3b3e89d1bf26ea869710a5bd4035f3a1fe110cd1af27850ae60cf580073d49d5
+summary(loc-001).to_json()      4 880 bytes
+  sha256 a3b294771b94348e9212111e98cf1ca21b721659a1189fc3954e44bdc938e7e4
 ```
+
+(The dataset digest is unchanged by issue #92 -- the simulated observations are
+exactly the same. The two summary digests moved because `week_over_week`'s
+entry in `METRIC_DEFINITIONS`, which every summary and report embeds, gained the
+gap clause; the fixture's own numbers and rows are identical.)
 
 Two runs in one process, and `simulate_dataset(seed=91)`, differ as expected;
 `tests/test_seo_ranking.py` pins the mixer itself (`_seed_int(90, "a", "b") ==
@@ -192,7 +210,7 @@ stream is provably independent of `random`.
 cd /opt/data/gbp-integration && PYTHONPATH=src python3 -m unittest tests.test_seo_ranking
 ```
 
-57 tests: the full validation matrix (out-of-range / non-int / bool positions,
+77 tests: the full validation matrix (out-of-range / non-int / bool positions,
 malformed weeks, blank identifiers, non-simulated sources including
 `"local-rank-grid"`, duplicates), frozen dataclass, generator determinism and
 input-order independence, the frozen mixer constants, hand-computed metrics for
@@ -203,6 +221,57 @@ report refusing a summary that lost the marker, deterministic serialization and
 an explicit **offline guard** (sockets patched to raise, a source scan for
 network/scraping/`random` imports, and a check that no public name mentions a
 grid, scraping or fetching).
+
+20 of those tests are the issue #92 regressions, in three groups: the
+`week_over_week` gap rules (missing week -> `direction: "gap"` with a null
+delta, real year boundaries still yield a delta, a 53-week year is not jumped
+over, and the fixture has no gap rows); the strict ISO-week matrix (rejects
+`2025-W53` / `2021-W53` (53 weeks in 52-week years), `0000-W01`, week `00` /
+`54`, trailing newline / carriage return / spaces / junk, and Arabic-Indic,
+full-width and superscript digits; accepts `2020-W53`, `2026-W53` and ordinary
+weeks, through `parse_week`, `week_label`, `RankObservation` and
+`iso_week_range` alike); and central duplicate refusal, asserted on a **list**,
+a **tuple**, a **generator** and a `RankSeries` for every metric function plus
+`summarize_location`. Reverting only `src/gbp/seo/ranking.py` to the pre-fix
+version fails 28 of these sub-tests, so they fail for the reason they exist.
+
+## Correction pass -- issue #92
+
+Three correctness defects in this module were found and fixed (same scope, same
+simulated-only gate, no other behaviour changed):
+
+1. **A gap was reported as a weekly change.** `week_over_week` paired the sorted
+   weeks present in the input with `zip(weeks, weeks[1:])`, so two weeks two
+   apart -- `2026-W10` (avg `4.0`) and `2026-W12` (avg `6.0`) -- produced
+   `delta: 2.0, direction: "worsened"`, i.e. a three-week movement was labelled a
+   one-week change. The pair is now emitted only when the two weeks are actually
+   consecutive on the ISO calendar (`next_week(earlier) == later`). The chosen
+   semantics for a gap: **keep the row and mark it** -- the two averages are
+   still shown, `delta` is `None` and `direction` is `"gap"` -- because this
+   module's rule elsewhere is to label what it cannot compute (a null week is
+   listed as `"unknown"`) rather than to drop it silently. A row can therefore
+   now never carry a delta that spans more than one ISO week. Consecutiveness is
+   calendar-driven, so `2020-W53 -> 2021-W01` is consecutive, and `2026-W52 ->
+   2027-W01` is a **gap**: 2026 has 53 ISO weeks, so `2026-W53` sits between
+   them (the framework follows the calendar, not the year number).
+2. **ISO week validation was too lax.** `^(\d{4})-W(\d{2})$` accepted `2026-W40\n`
+   (`$` matches before a trailing newline), non-ASCII digits (`\d` matches
+   them), `2025-W53` (2025 has 52 ISO weeks) and `0000-W01`. `parse_week` now
+   matches `\A([0-9]{4})-W([0-9]{2})\Z` on the whole ASCII string **and** checks the
+   real calendar with `date.fromisocalendar`; `week_label` applies the same
+   calendar check, so it cannot mint a label `parse_week` would refuse. The
+   comment claiming "week 53 is accepted for any year" is gone.
+3. **Duplicates were only refused inside `RankSeries`.** The metric functions and
+   the summary builders each materialized their own list, so a repeated
+   `(location_id, keyword, week)` cell slipped through: duplicate rank `1` +
+   rank `20` for one cell reported `average_position = 10.5`. Uniqueness is now
+   checked in the one shared normalization path (`_observations`), so **every**
+   public entry point -- list, tuple, generator or series -- refuses a duplicate
+   with the same clear error. There is still no silent deduplication.
+
+Accepted as-is, deliberately not changed: `week_over_week` compares a period's
+*sorted* weeks, `summarize_location` bounds its period before computing metrics,
+and the module still reports every position as simulated.
 
 ## Limits (by design)
 
