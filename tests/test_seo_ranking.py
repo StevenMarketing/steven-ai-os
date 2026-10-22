@@ -201,6 +201,65 @@ class WeekLabelTests(unittest.TestCase):
         self.assertEqual(iso_week_range("2026-W10", 0), ())
         self.assertEqual(DEFAULT_WEEKS, iso_week_range("2026-W10", 8))
 
+    # -- issue #92, defect 2: ISO week validation was too lax --------------
+    def test_parse_week_accepts_ordinary_weeks_and_real_53_week_years(self):
+        self.assertEqual(parse_week("2026-W10"), (2026, 10))
+        self.assertEqual(parse_week("2026-W01"), (2026, 1))
+        # 2020 and 2026 really do have 53 ISO weeks
+        self.assertEqual(parse_week("2020-W53"), (2020, 53))
+        self.assertEqual(parse_week("2026-W53"), (2026, 53))
+
+    def test_parse_week_rejects_a_non_consecutive_calendar_week(self):
+        # 2025 has 52 ISO weeks, so 2025-W53 does not exist
+        for bad in ("2025-W53", "2021-W53", "0000-W01", "2026-W00",
+                    "2026-W54"):
+            with self.subTest(week=bad):
+                with self.assertRaises(ValueError) as ctx:
+                    parse_week(bad)
+                self.assertIn("ISO week", str(ctx.exception))
+
+    def test_parse_week_rejects_a_trailing_newline_and_junk(self):
+        for bad in ("2026-W40\n", "2026-W40\r\n", "2026-W40 ", "\n2026-W40",
+                    "2026-W40-", "x2026-W40", "2026-W40x"):
+            with self.subTest(week=bad):
+                with self.assertRaises(ValueError):
+                    parse_week(bad)
+
+    def test_parse_week_rejects_non_ascii_digits(self):
+        # Arabic-Indic, Devanagari, full-width and superscript digits all look
+        # numeric to a human and to ``\d`` -- none of them is an ISO week.
+        for bad in ("\u0662\u0660\u0662\u0666-W40",   # ٢٠٢٦
+                    "\u0662026-W40",                   # one Arabic-Indic 2
+                    "2026-W\u0664\u0660",              # Arabic-Indic 40
+                    "\uff12\uff10\uff12\uff16-W40",    # full-width 2026
+                    "2026-W\u00b2\u2070"):             # superscript
+            with self.subTest(week=bad):
+                with self.assertRaises(ValueError):
+                    parse_week(bad)
+
+    def test_the_label_paths_agree_that_week_53_needs_a_53_week_year(self):
+        # ``week_label`` cannot mint a label ``parse_week`` would refuse.
+        self.assertEqual(week_label(2020, 53), "2020-W53")
+        self.assertEqual(week_label(2026, 53), "2026-W53")
+        with self.assertRaises(ValueError):
+            week_label(2025, 53)
+        with self.assertRaises(ValueError):
+            week_label(0, 1)
+        for label in ("2025-W53", "0000-W01", "2026-W40\n"):
+            with self.assertRaises(ValueError):
+                RankObservation(_LOC_1, "gel nails", label, 5)
+            with self.assertRaises(ValueError):
+                iso_week_range(label, 1)
+
+    def test_a_53_week_year_is_not_skipped_over(self):
+        # 2026 has 53 ISO weeks, so 2026-W52 -> 2027-W01 is NOT consecutive.
+        self.assertEqual(next_week("2026-W52"), "2026-W53")
+        self.assertEqual(next_week("2026-W53"), "2027-W01")
+        self.assertNotEqual(next_week("2026-W52"), "2027-W01")
+        # 2020 has 53 weeks and 2025 has 52: the boundary differs by real year.
+        self.assertEqual(next_week("2020-W53"), "2021-W01")
+        self.assertEqual(next_week("2025-W52"), "2026-W01")
+
 
 class GeneratorTests(unittest.TestCase):
     def test_same_seed_gives_byte_identical_series(self):
@@ -385,6 +444,67 @@ class MetricTests(unittest.TestCase):
         self.assertIsNone(rows[1]["from_average_position"])
         self.assertEqual(rows[1]["to_average_position"], 7.0)
 
+    # -- issue #92, defect 1: a gap is not a week-over-week change ---------
+    def test_week_over_week_marks_a_missing_week_as_a_gap(self):
+        # the supervisor's proof case: W10 (avg 4) and W12 (avg 6) are TWO
+        # weeks apart, so the +2.0 must not be reported as a weekly change.
+        obs = (RankObservation(_LOC_1, "kw", "2026-W10", 4),
+               RankObservation(_LOC_1, "kw", "2026-W12", 6))
+        rows = week_over_week(obs)
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        self.assertEqual(row["from_week"], "2026-W10")
+        self.assertEqual(row["to_week"], "2026-W12")
+        self.assertIsNone(row["delta"])
+        self.assertEqual(row["direction"], "gap")
+        self.assertNotIn("worsened", row["direction"])
+        # the two averages are still shown, so the gap is visible, not hidden
+        self.assertEqual(row["from_average_position"], 4.0)
+        self.assertEqual(row["to_average_position"], 6.0)
+
+    def test_week_over_week_gap_is_not_confused_with_a_null_week(self):
+        obs = (RankObservation(_LOC_1, "kw", "2026-W01", 5),
+               RankObservation(_LOC_1, "kw", "2026-W02", None),
+               RankObservation(_LOC_1, "kw", "2026-W04", 6))
+        rows = week_over_week(obs)
+        self.assertEqual([row["direction"] for row in rows],
+                         ["unknown", "gap"])
+        self.assertTrue(all(row["delta"] is None for row in rows))
+
+    def test_week_over_week_deltas_survive_a_year_boundary(self):
+        # consecutive across a real year boundary -> delta present
+        boundary = (RankObservation(_LOC_1, "kw", "2020-W53", 4),
+                    RankObservation(_LOC_1, "kw", "2021-W01", 6))
+        row = week_over_week(boundary)[0]
+        self.assertEqual(row["delta"], 2.0)
+        self.assertEqual(row["direction"], "worsened")
+        # 2025 has 52 ISO weeks, so 2025-W52 -> 2026-W01 is consecutive too
+        short = (RankObservation(_LOC_1, "kw", "2025-W52", 8),
+                 RankObservation(_LOC_1, "kw", "2026-W01", 5))
+        row = week_over_week(short)[0]
+        self.assertEqual(row["delta"], -3.0)
+        self.assertEqual(row["direction"], "improved")
+
+    def test_week_over_week_does_not_jump_a_53_week_year(self):
+        # 2026 has 53 ISO weeks: W52 -> 2027-W01 skips 2026-W53, so it is a gap
+        obs = (RankObservation(_LOC_1, "kw", "2026-W52", 4),
+               RankObservation(_LOC_1, "kw", "2027-W01", 9))
+        row = week_over_week(obs)[0]
+        self.assertIsNone(row["delta"])
+        self.assertEqual(row["direction"], "gap")
+        # ... while W52 -> W53 -> 2027-W01 is two consecutive deltas
+        full = (RankObservation(_LOC_1, "kw", "2026-W52", 4),
+                RankObservation(_LOC_1, "kw", "2026-W53", 7),
+                RankObservation(_LOC_1, "kw", "2027-W01", 9))
+        rows = week_over_week(full)
+        self.assertEqual([row["delta"] for row in rows], [3.0, 2.0])
+
+    def test_the_fixture_has_no_gaps_because_its_weeks_are_consecutive(self):
+        for obs_list in (_FIXTURE.select(location_id=_LOC_1),
+                         _FIXTURE.select(location_id=_LOC_2)):
+            for row in week_over_week(obs_list):
+                self.assertNotEqual(row["direction"], "gap")
+
     def test_null_weeks_stay_in_the_top_share_denominator(self):
         obs = (RankObservation(_LOC_1, "kw", "2026-W01", 1),
                RankObservation(_LOC_1, "kw", "2026-W02", None),
@@ -425,6 +545,108 @@ class MetricTests(unittest.TestCase):
             coverage([{"position": 1}])  # type: ignore[list-item]
         with self.assertRaises(ValueError):
             visibility_index([None])  # type: ignore[list-item]
+
+
+class DuplicateCellTests(unittest.TestCase):
+    """Issue #92, defect 3: duplicates are refused centrally, by EVERY entry.
+
+    ``(location_id, keyword, week)`` is the key; two readings of one cell in one
+    ISO week cannot both be true, so no public entry point may silently average
+    them. ``RankSeries`` already refused them -- these tests pin that the plain
+    metric functions and the summary builders refuse them too, for a list, a
+    tuple and a generator alike.
+    """
+
+    def setUp(self):
+        self.duplicates = (RankObservation(_LOC_1, "kw", "2026-W10", 1),
+                           RankObservation(_LOC_1, "kw", "2026-W10", 20))
+
+    @staticmethod
+    def _expected_average_if_averaged():
+        # what the old code returned: (1 + 20) / 2 -- the distortion to prevent
+        return 10.5
+
+    def test_the_duplicate_really_would_change_the_numbers(self):
+        # guard against a vacuous test: if these two rows were merged into one
+        # observation the metrics would silently differ from the honest ones.
+        self.assertEqual((1 + 20) / 2, self._expected_average_if_averaged())
+        self.assertEqual(average_position(
+            (RankObservation(_LOC_1, "kw", "2026-W10", 1),)), 1.0)
+
+    def test_duplicate_rank_1_and_rank_20_raise_instead_of_averaging(self):
+        with self.assertRaises(ValueError) as ctx:
+            average_position(self.duplicates)
+        message = str(ctx.exception)
+        self.assertIn("duplicate (location_id, keyword, week)", message)
+        self.assertIn("2026-W10", message)
+        self.assertNotIn(str(self._expected_average_if_averaged()), message)
+
+    def test_every_metric_entry_point_rejects_a_duplicate_list(self):
+        calls = {
+            "coverage": lambda: coverage(self.duplicates),
+            "average_position": lambda: average_position(self.duplicates),
+            "best_position": lambda: best_position(self.duplicates),
+            "worst_position": lambda: worst_position(self.duplicates),
+            "top_share": lambda: top_share(self.duplicates, 10),
+            "week_over_week": lambda: week_over_week(self.duplicates),
+            "visibility_by_keyword": lambda: visibility_by_keyword(
+                self.duplicates),
+            "visibility_index": lambda: visibility_index(self.duplicates),
+            "summarize_location": lambda: summarize_location(
+                _LOC_1, self.duplicates),
+        }
+        for name, call in calls.items():
+            with self.subTest(entry_point=name):
+                with self.assertRaises(ValueError) as ctx:
+                    call()
+                self.assertIn("duplicate (location_id, keyword, week)",
+                              str(ctx.exception))
+
+    def test_a_duplicate_exposed_only_once_through_a_generator_still_raises(
+            self):
+        # a generator is the nastiest input: it can be consumed only once and
+        # hides its length, so the check cannot be a "len(set(...))" on a list
+        # the caller already materialized.
+        def feed():
+            for observation in self.duplicates:
+                yield observation
+
+        with self.assertRaises(ValueError) as ctx:
+            average_position(feed())
+        self.assertIn("duplicate (location_id, keyword, week)",
+                      str(ctx.exception))
+
+        def feed_again():
+            for observation in self.duplicates:
+                yield observation
+
+        with self.assertRaises(ValueError) as ctx:
+            summarize_location(_LOC_1, feed_again())
+        self.assertIn("duplicate (location_id, keyword, week)",
+                      str(ctx.exception))
+
+    def test_a_duplicate_tuple_and_a_duplicate_series_member_are_refused(self):
+        with self.assertRaises(ValueError):
+            coverage(tuple(self.duplicates))
+        # a RankSeries cannot hold a duplicate at all
+        with self.assertRaises(ValueError):
+            RankSeries(self.duplicates)
+        # ... and a *valid* series passed to a metric stays accepted
+        series = RankSeries([RankObservation(_LOC_1, "kw", "2026-W10", 3)])
+        self.assertEqual(average_position(series), 3.0)
+
+    def test_the_same_week_for_a_different_keyword_or_location_is_allowed(self):
+        distinct = (RankObservation(_LOC_1, "kw", "2026-W10", 6),
+                    RankObservation(_LOC_1, "other kw", "2026-W10", 8),
+                    RankObservation(_LOC_2, "kw", "2026-W10", 10))
+        self.assertEqual(average_position(distinct), 8.0)
+        self.assertEqual(len(summarize_location(
+            _LOC_1, distinct[:2]).visibility_by_keyword), 2)
+
+    def test_the_fixture_dataset_has_no_duplicates_and_still_summarizes(self):
+        self.assertEqual(len(_FIXTURE), len(_FIXTURE.observations))
+        summary = summarize_location(_LOC_1, _FIXTURE.select(location_id=_LOC_1))
+        self.assertEqual(summary.observation_count, 24)
 
 
 class SummaryTests(unittest.TestCase):
@@ -510,6 +732,31 @@ class SummaryTests(unittest.TestCase):
         self.assertEqual(len(summary.visibility_by_keyword), 3)
         with self.assertRaises(ValueError):
             summarize_location(_LOC_1, items, ["2026-W10", "2026-W10"])
+
+    def test_a_summary_reports_a_week_gap_instead_of_a_weekly_change(self):
+        obs = (RankObservation(_LOC_1, "kw", "2026-W10", 4),
+               RankObservation(_LOC_1, "kw", "2026-W12", 6))
+        summary = summarize_location(_LOC_1, obs, ["2026-W10", "2026-W12"])
+        self.assertEqual(summary.weeks, ("2026-W10", "2026-W12"))
+        self.assertEqual(len(summary.week_over_week), 1)
+        row = summary.week_over_week[0]
+        self.assertIsNone(row["delta"])
+        self.assertEqual(row["direction"], "gap")
+        # the metrics of the two-week period itself stay honest
+        self.assertEqual(summary.average_position, 5.0)
+        self.assertEqual(summary.coverage, 1.0)
+        self.assertEqual(summary.observation_count, 2)
+
+    def test_a_summary_rejects_a_duplicate_cell_through_any_iterable(self):
+        duplicates = [RankObservation(_LOC_1, "kw", "2026-W10", 1),
+                      RankObservation(_LOC_1, "kw", "2026-W10", 20)]
+        for source in (duplicates, tuple(duplicates),
+                       (obs for obs in duplicates)):
+            with self.subTest(kind=type(source).__name__):
+                with self.assertRaises(ValueError) as ctx:
+                    summarize_location(_LOC_1, source)
+                self.assertIn("duplicate (location_id, keyword, week)",
+                              str(ctx.exception))
 
     def test_summary_serialization_is_deterministic(self):
         items = _FIXTURE.select(location_id=_LOC_1)

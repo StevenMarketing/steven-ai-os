@@ -47,7 +47,10 @@ See :data:`METRIC_DEFINITIONS` for the machine-readable copy of this table.
   period, the delta ``average_position(later) - average_position(earlier)``.
   Negative means the average position number got smaller, i.e. the salon moved
   *up*. A week whose average is ``None`` (no position at all) yields a ``None``
-  delta and is listed, never dropped silently.
+  delta and is listed, never dropped silently. Two weeks that are present in the
+  period but are **not** consecutive ISO weeks (a missing week between them) are
+  reported as a **gap** -- ``delta`` is ``None`` and ``direction`` is ``"gap"``
+  -- and are never presented as a week-over-week change (issue #92).
 * ``visibility_index``: an **internal** index, **not** a Google metric and not
   comparable to any Google-reported number. Definition: for one keyword, score
   each observation as ``max(0, 21 - position) / 20`` and score a null week as
@@ -57,6 +60,20 @@ See :data:`METRIC_DEFINITIONS` for the machine-readable copy of this table.
   when the period has no observations. ``21 - position`` is used so that
   position 1 scores ``1.0``, position 20 scores ``0.05`` and "outside top 20"
   scores ``0``.
+
+Duplicate cells are refused everywhere, never silently deduplicated
+------------------------------------------------------------------
+``(location_id, keyword, week)`` is the key of an observation, and a duplicate
+cell is refused **centrally**, in the shared input normalization
+(:func:`_observations`), not only inside :class:`RankSeries`. Every public entry
+point that takes observations -- :func:`coverage`, :func:`average_position`,
+:func:`best_position`, :func:`worst_position`, :func:`top_share`,
+:func:`week_over_week`, :func:`visibility_by_keyword`, :func:`visibility_index`
+and :func:`summarize_location` -- therefore raises ``ValueError`` for the same
+duplicate, whether the caller passes a list, a tuple, a generator or a
+:class:`RankSeries`. Two readings of one cell in one ISO week cannot both be
+true, so the framework refuses the input instead of averaging or deduplicating
+it (issue #92).
 """
 
 from __future__ import annotations
@@ -138,10 +155,31 @@ MULTI_LOCATION_NOTE = (
 #: top 20", never "unknown" and never a stand-in for a grid rank.
 MAX_POSITION = 20
 
-#: ``YYYY-Www`` (ISO week), e.g. ``2026-W10``. Validated but not checked against
-#: the calendar (week 53 is accepted for any year; use :func:`iso_week_range`
-#: when you need real consecutive ISO weeks).
-_WEEK_RE = re.compile(r"^(\d{4})-W(\d{2})$")
+#: ``YYYY-Www`` (ISO week), e.g. ``2026-W10``. ``\A..\Z`` anchors the whole
+#: string (``$`` would accept a trailing newline) and ``[0-9]`` keeps the digits
+#: strictly ASCII (``\d`` would accept ``٢``, ``４``, ...). The label must also
+#: be a **real ISO calendar week** -- the pattern alone cannot know that
+#: ``2025-W53`` does not exist; :func:`_iso_week_or_raise` checks the calendar.
+_WEEK_RE = re.compile(r"\A([0-9]{4})-W([0-9]{2})\Z")
+
+
+def _iso_week_or_raise(year: int, week: int, label: str) -> Tuple[int, int]:
+    """``(year, week)`` if it is a real ISO week, else ``ValueError``.
+
+    ``datetime.date.fromisocalendar`` is the calendar authority: it rejects
+    ``2025-W53`` (2025 has 52 ISO weeks), week ``00`` / ``54``, and any year
+    outside ``1..9999`` (e.g. ``0000-W01``), while accepting ``2020-W53`` and
+    ``2026-W53``, the two fixture years that really do have 53 weeks.
+    """
+    try:
+        date.fromisocalendar(year, week, 1)
+    except ValueError as exc:
+        raise ValueError(
+            f"ISO week is not a real calendar week: {label!r} ({exc}). "
+            "A label must be an existing ISO week, e.g. '2026-W10'; 53-week "
+            "years are the exception, not the rule (2020 and 2026 have one, "
+            "2025 does not).") from exc
+    return year, week
 
 #: Machine-readable copy of the metric contract in the module docstring.
 METRIC_DEFINITIONS: Dict[str, str] = {
@@ -169,7 +207,9 @@ METRIC_DEFINITIONS: Dict[str, str] = {
         "for each pair of consecutive ISO weeks present in the period: later "
         "average_position minus earlier average_position; negative means the "
         "average position number fell, i.e. the salon moved up; a week with no "
-        "non-null position yields a null delta and is still listed"
+        "non-null position yields a null delta and is still listed; two weeks "
+        "that are present but not consecutive ISO weeks yield a null delta and "
+        "direction 'gap' -- a gap is never presented as a week-over-week change"
     ),
     "visibility_index": (
         "INTERNAL index, not a Google metric: per keyword, score each "
@@ -184,21 +224,30 @@ METRIC_DEFINITIONS: Dict[str, str] = {
 # deterministic helpers
 # --------------------------------------------------------------------------
 def week_label(year: int, week: int) -> str:
-    """Canonical ISO week label, e.g. ``week_label(2026, 10) == '2026-W10'``."""
+    """Canonical ISO week label, e.g. ``week_label(2026, 10) == '2026-W10'``.
+
+    The pair must be a **real** ISO calendar week: ``week_label(2025, 53)``
+    raises -- 2025 has 52 ISO weeks -- while ``week_label(2020, 53)`` and
+    ``week_label(2026, 53)`` are accepted (both years really have 53 weeks).
+    """
     if not isinstance(year, int) or isinstance(year, bool):
         raise ValueError(f"week year must be an int, got {type(year).__name__}")
     if not isinstance(week, int) or isinstance(week, bool):
         raise ValueError(f"ISO week must be an int, got {type(week).__name__}")
     if not 1 <= week <= 53:
         raise ValueError(f"ISO week must be in 1..53, got {week!r}")
+    _iso_week_or_raise(year, week, f"{year:04d}-W{week:02d}")
     return f"{year:04d}-W{week:02d}"
 
 
 def parse_week(label: str) -> Tuple[int, int]:
     """Split a canonical ISO week label into ``(year, week)``.
 
-    Raises ``ValueError`` on anything that is not ``YYYY-Www`` with a week in
-    ``1..53``.
+    Strict on purpose (issue #92): the whole string must be ASCII ``YYYY-Www``
+    -- a trailing newline, non-ASCII digits, a leading space or any extra
+    character is refused -- and the pair must be a real ISO calendar week, so
+    ``2025-W53`` (2025 has 52 ISO weeks) and ``0000-W01`` raise while
+    ``2020-W53`` is accepted.
     """
     if not isinstance(label, str):
         raise ValueError(f"ISO week must be a string, got {type(label).__name__}")
@@ -209,11 +258,17 @@ def parse_week(label: str) -> Tuple[int, int]:
     year, week = int(match.group(1)), int(match.group(2))
     if not 1 <= week <= 53:
         raise ValueError(f"ISO week number must be in 1..53, got {label!r}")
-    return year, week
+    return _iso_week_or_raise(year, week, label)
 
 
 def next_week(label: str) -> str:
-    """The ISO week after ``label``, correct across year boundaries."""
+    """The ISO week after ``label``, correct across year boundaries.
+
+    Driven by the real ISO calendar (``date(year, 12, 28).isocalendar()[1]``),
+    so a 53-week year is handled: ``next_week('2020-W53') == '2021-W01'``, but
+    also ``next_week('2026-W52') == '2026-W53'`` -- 2026 really has 53 ISO
+    weeks, so ``2026-W52`` and ``2027-W01`` are ***not*** consecutive.
+    """
     year, week = parse_week(label)
     if week >= date(year, 12, 28).isocalendar()[1]:
         return week_label(year + 1, 1)
@@ -528,12 +583,36 @@ def simulate_dataset(seed: Any = DEFAULT_SEED,
 # metrics (definitions in METRIC_DEFINITIONS / the module docstring)
 # --------------------------------------------------------------------------
 def _observations(observations: Iterable[Any]) -> List[RankObservation]:
+    """Materialize and validate any accepted input iterable (issue #92).
+
+    The single normalization path every public metric / summary entry point
+    goes through, so the two hard input rules hold identically for a list, a
+    tuple, a generator or a :class:`RankSeries`:
+
+    * only :class:`RankObservation` values are accepted;
+    * a duplicate ``(location_id, keyword, week)`` cell is **refused**, never
+      silently averaged or deduplicated -- two readings of one cell in one ISO
+      week cannot both be true, so the input is invalid rather than merely
+      noisy.
+    """
     items = list(observations)
     for item in items:
         if not isinstance(item, RankObservation):
             raise ValueError(
                 "metrics take RankObservation values only, got "
                 f"{type(item).__name__}")
+    counts: Dict[Tuple[str, str, str], int] = {}
+    for item in items:
+        counts[item.key] = counts.get(item.key, 0) + 1
+    duplicates = sorted(key for key, count in counts.items() if count > 1)
+    if duplicates:
+        detail = ", ".join(
+            f"{key!r} x{counts[key]}" for key in duplicates)
+        raise ValueError(
+            "duplicate (location_id, keyword, week) cells are not allowed: "
+            f"{detail}. Two readings of one cell in one ISO week cannot both "
+            "be true, so rank metrics refuse the input rather than silently "
+            "averaging or deduplicating it.")
     return items
 
 
@@ -595,6 +674,22 @@ def week_over_week(observations: Iterable[Any]) -> Tuple[Dict[str, Any], ...]:
     *number* fell, i.e. the salon moved up. A week with no non-null position has
     ``None`` average and produces a ``None`` delta -- it is reported, never
     skipped.
+
+    Only **consecutive** ISO weeks may yield a delta (issue #92). Two weeks that
+    are present in the input but are *not* neighbours on the ISO calendar (a
+    missing week between them, e.g. ``2026-W10`` and ``2026-W12``) are reported
+    as an explicit **gap**: the two averages are listed, ``delta`` is ``None``
+    and ``direction`` is ``"gap"``. A gap therefore reads as "these weeks are
+    two apart", never as a weekly change: a change that took three weeks must
+    not be labelled a one-week change. Consecutiveness is decided with
+    :func:`next_week`, i.e. by the real calendar, so year boundaries work
+    (``2020-W53 -> 2021-W01``) and a 53-week year is not skipped over
+    (``2026-W52 -> 2026-W53`` is consecutive, ``2026-W52 -> 2027-W01`` is a
+    gap).
+
+    ``direction`` is ``"improved"`` / ``"worsened"`` / ``"flat"`` for a
+    consecutive pair with a delta, ``"unknown"`` for a consecutive pair where
+    one week has no position at all, and ``"gap"`` for a non-consecutive pair.
     """
     items = _observations(observations)
     by_week: Dict[str, List[RankObservation]] = {}
@@ -605,8 +700,13 @@ def week_over_week(observations: Iterable[Any]) -> Tuple[Dict[str, Any], ...]:
     for earlier, later in zip(weeks, weeks[1:]):
         earlier_avg = average_position(by_week[earlier])
         later_avg = average_position(by_week[later])
-        if earlier_avg is None or later_avg is None:
+        if next_week(earlier) != later:
+            # not consecutive ISO weeks: this is a gap in the period, not a
+            # week-over-week change, so it must not carry a delta at all.
             delta: Optional[float] = None
+            direction = "gap"
+        elif earlier_avg is None or later_avg is None:
+            delta = None
             direction = "unknown"
         else:
             delta = round(later_avg - earlier_avg, 3)
