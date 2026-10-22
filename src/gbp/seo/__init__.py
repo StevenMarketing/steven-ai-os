@@ -30,6 +30,13 @@ from .preview import (
     PreviewError,
     build_preview,
 )
+from .gap import (
+    GAP_DISCLAIMER,
+    SMALL_N_MINIMUM,
+    GapReport,
+    analyze_gap,
+    load_gap_fixture,
+)
 
 __all__ = [
     "ALLOWED_PRIMARY_CATEGORIES",
@@ -37,15 +44,20 @@ __all__ = [
     "DATASET_NAMES",
     "DISCLAIMER",
     "DemoError",
+    "GAP_DISCLAIMER",
     "PREFERRED_PRIMARY_CATEGORY",
     "PreviewError",
     "SCORE_LABEL",
+    "SMALL_N_MINIMUM",
     "AuditReport",
     "Finding",
+    "GapReport",
     "LocationAudit",
+    "analyze_gap",
     "audit_location",
     "audit_profiles",
     "build_preview",
+    "load_gap_fixture",
     "load_profiles",
     "severity_rank",
 ]
