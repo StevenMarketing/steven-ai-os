@@ -12,6 +12,11 @@ explainable, prioritized actions.
 
 Implementation: `src/gbp/seo/audit.py` · Tests: `tests/test_seo_audit.py`.
 
+Companion module (issue #88): `src/gbp/seo/gap.py` -- offline competitor-gap
+analysis that *reuses* this engine's `audit_location` scores instead of
+re-implementing them. See `docs/SEO-GAP.md`. The audit engine itself still uses
+no competitor data and makes no ranking claim.
+
 ## What it checks
 
 | Area | Codes | Notes |
