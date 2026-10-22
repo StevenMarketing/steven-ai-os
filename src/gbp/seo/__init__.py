@@ -22,16 +22,30 @@ from .audit import (
     load_profiles,
     severity_rank,
 )
+from .preview import (
+    BANNER,
+    DATASET_NAMES,
+    SCORE_LABEL,
+    DemoError,
+    PreviewError,
+    build_preview,
+)
 
 __all__ = [
     "ALLOWED_PRIMARY_CATEGORIES",
+    "BANNER",
+    "DATASET_NAMES",
     "DISCLAIMER",
+    "DemoError",
     "PREFERRED_PRIMARY_CATEGORY",
+    "PreviewError",
+    "SCORE_LABEL",
     "AuditReport",
     "Finding",
     "LocationAudit",
     "audit_location",
     "audit_profiles",
+    "build_preview",
     "load_profiles",
     "severity_rank",
 ]

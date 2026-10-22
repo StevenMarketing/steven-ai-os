@@ -92,6 +92,10 @@
           <span class="dot" id="nav-business-dot" aria-hidden="true"></span>
           <span class="tab-label">Business Dashboard</span>
         </button>
+        <button class="nav-sub" data-area="seo" type="button" data-i18n="nav.seoAudit">
+          <span class="dot" id="nav-seo-dot" aria-hidden="true"></span>
+          <span class="tab-label">SEO Audit</span>
+        </button>
         <button class="nav-sub" data-area="google" type="button" data-i18n="nav.googleConnection">
           <span class="dot" id="nav-google-dot" aria-hidden="true"></span>
           <span class="tab-label">Google Connection</span>
@@ -410,6 +414,53 @@
             <div class="table-scroll">
               <div id="google-preview-reviews"></div>
             </div>
+          </div>
+        </section>
+
+        <!-- SEO Audit -> area=seo (READ-ONLY offline audit preview, issue #42).
+             The findings come from the issue #39 audit engine, served by
+             GET /api/seo/audit over synthetic fixtures. There is no live Google
+             connectivity, no ranking claim, no profile edit and nothing is
+             published: the score is a heuristic COMPLETENESS score only. -->
+        <section class="area" id="area-seo" hidden>
+          <h2>SEO Audit
+            <span class="fixture-badge" id="seo-fixture-badge">DEMO</span>
+          </h2>
+
+          <div class="offline-banner" id="seo-banner" role="status">
+            DEMO / OFFLINE PREVIEW — no live Google connectivity. Synthetic
+            fixture data only; nothing is read from or written to Google.
+          </div>
+
+          <p class="muted" id="seo-note">Read-only preview powered by the offline
+            audit engine. No Google API call, no competitor ranking data, no
+            automatic profile change.</p>
+
+          <form class="filters" id="seo-filters" onsubmit="return false;">
+            <label for="seo-dataset">Fixture dataset
+              <select id="seo-dataset" aria-label="Choose the offline fixture dataset">
+                <option value="default" selected>Default demo account</option>
+                <option value="incomplete">Sparse shop (missing fields)</option>
+                <option value="hostile">Markup-in-text shop</option>
+                <option value="empty">Empty (no salons)</option>
+                <option value="error">Error state demo</option>
+              </select>
+            </label>
+            <label for="seo-salon">Business
+              <select id="seo-salon" aria-label="Select a salon by name, ZIP and resource id"></select>
+            </label>
+            <button type="button" id="seo-reset">Reset</button>
+          </form>
+
+          <p class="muted" id="seo-score-caption"></p>
+
+          <div class="table-scroll">
+            <div id="seo-salons"></div>
+          </div>
+
+          <div class="panel" id="seo-detail">
+            <h3 class="panel-title" id="seo-detail-title">Salon audit</h3>
+            <div id="seo-detail-body"></div>
           </div>
         </section>
 
