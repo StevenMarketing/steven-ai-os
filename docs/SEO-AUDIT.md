@@ -30,6 +30,13 @@ Every finding carries `code`, `severity` (`high`/`medium`/`low`), `field`,
 code, then field, so the output is stable. Each location gets a deterministic
 0-100 completeness `score` (100 − 15·high − 7·medium − 3·low, floored at 0).
 
+One finding is informational and does **not** affect the score:
+`SEO-IDENTITY-REUSED-NAME` (same name across locations with distinct ZIPs — normal
+for a chain) is still reported and still appears in the actions list, but its
+penalty is excluded from the score. The probable-duplicate
+`SEO-IDENTITY-DUPLICATE-NAME-ZIP` keeps its full `high` penalty. The exclusion is
+declared once in `_NON_SCORING_CODES` in `src/gbp/seo/audit.py`.
+
 ## Multi-location identity
 
 Two salons may share a name. Following `tests/test_zip_code.py` and
@@ -37,7 +44,7 @@ Two salons may share a name. Following `tests/test_zip_code.py` and
 resource id:
 
 * same name, **distinct** ZIPs → kept separate, reported as `SEO-IDENTITY-REUSED-NAME`
-  (informational: disambiguate, never merge);
+  (informational: disambiguate, never merge; does not lower the score);
 * same name **and** ZIP → `SEO-IDENTITY-DUPLICATE-NAME-ZIP` (`high`): probable
   duplicate listing, a human must confirm.
 
@@ -68,7 +75,7 @@ Example (synthetic demo account, trimmed):
   "locations": [
     {
       "location_name": "accounts/1001/locations/loc-002",
-      "score": 35,
+      "score": 38,
       "highest_severity": "medium",
       "findings": [
         {
@@ -91,10 +98,11 @@ Example (synthetic demo account, trimmed):
 cd /opt/data/gbp-integration && PYTHONPATH=src python3 -m unittest tests.test_seo_audit
 ```
 
-29 tests: completeness, categories/services, description, hours, duplicate
-name/ZIP, empty and malformed fixtures, deterministic JSON, prioritised actions,
-deep-copy fixtures, and an explicit **no-network guard** (sockets patched to raise
-and a source scan for network imports).
+34 tests: completeness, categories/services, description, hours, duplicate
+name/ZIP, reused-name non-scoring behaviour, empty and malformed fixtures,
+deterministic JSON, prioritised actions, deep-copy fixtures, and an explicit
+**no-network guard** (sockets patched to raise and a source scan for network
+imports).
 
 ## Limits (by design)
 

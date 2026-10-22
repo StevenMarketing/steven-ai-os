@@ -233,6 +233,38 @@ class IdentityTests(unittest.TestCase):
             self.assertIn("SEO-IDENTITY-DUPLICATE-NAME-ZIP", _codes(loc))
             self.assertEqual(loc.highest_severity, "high")
 
+    def test_reused_name_is_reported_but_does_not_lower_score(self):
+        # Repo-owner decision (issue #39): a chain reusing its name across
+        # locations with distinct ZIPs is normal. The note stays in the report
+        # and in the actions list, but a complete profile still scores 100.
+        profiles = [
+            _profile(location_name=f"accounts/1001/locations/loc-{i:03d}",
+                     title="Demo Nails", postal_code=zipcode)
+            for i, zipcode in enumerate(("92841", "92683", "92703"), start=1)
+        ]
+        report = audit_profiles(profiles)
+        self.assertEqual(len(report.locations), 3)
+        for loc in report.locations:
+            self.assertIn("SEO-IDENTITY-REUSED-NAME", _codes(loc))
+            self.assertNotIn("SEO-IDENTITY-DUPLICATE-NAME-ZIP", _codes(loc))
+            self.assertEqual(loc.score, 100, _codes(loc))
+            # still surfaced as an action, just not a scored one
+            self.assertIn("SEO-IDENTITY-REUSED-NAME",
+                          [f.code for f in loc.actions])
+
+    def test_duplicate_name_and_zip_still_lowers_score(self):
+        # The probable-duplicate finding keeps its high-severity penalty.
+        profiles = [
+            _profile(location_name="accounts/1001/locations/loc-001",
+                     title="Demo Nails", postal_code="92841"),
+            _profile(location_name="accounts/1001/locations/loc-003",
+                     title="Demo Nails", postal_code="92841"),
+        ]
+        report = audit_profiles(profiles)
+        for loc in report.locations:
+            self.assertIn("SEO-IDENTITY-DUPLICATE-NAME-ZIP", _codes(loc))
+            self.assertLess(loc.score, 100)
+
 
 class RobustnessTests(unittest.TestCase):
     def test_empty_and_malformed_fixtures(self):

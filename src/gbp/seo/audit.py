@@ -82,6 +82,14 @@ REQUIRED_FIELDS = (
 SEVERITY_ORDER: Dict[str, int] = {"high": 0, "medium": 1, "low": 2}
 _SEVERITY_WEIGHT: Dict[str, int] = {"high": 15, "medium": 7, "low": 3}
 
+#: Findings that are informational only and must NOT reduce the completeness
+#: ``score``. ``SEO-IDENTITY-REUSED-NAME`` (the same business name across
+#: locations that have *distinct* ZIPs) is normal for a chain, so it stays in
+#: the report and in the ordered ``actions`` list but carries no score penalty.
+#: The probable-duplicate ``SEO-IDENTITY-DUPLICATE-NAME-ZIP`` is deliberately
+#: NOT listed here: sharing name *and* ZIP keeps its high-severity penalty.
+_NON_SCORING_CODES = frozenset({"SEO-IDENTITY-REUSED-NAME"})
+
 _WEEKDAYS = ("monday", "tuesday", "wednesday", "thursday", "friday",
              "saturday", "sunday")
 
@@ -148,8 +156,15 @@ class LocationAudit:
 
     @property
     def score(self) -> int:
-        """Deterministic 0-100 completeness score (higher is more complete)."""
-        penalty = sum(_SEVERITY_WEIGHT.get(f.severity, 0) for f in self.findings)
+        """Deterministic 0-100 completeness score (higher is more complete).
+
+        Penalty is the summed severity weight, except that informational
+        findings listed in :data:`_NON_SCORING_CODES` (currently only the
+        reused-name note) are excluded: they are reported but never lower the
+        score.
+        """
+        penalty = sum(_SEVERITY_WEIGHT.get(f.severity, 0)
+                      for f in self.findings if f.code not in _NON_SCORING_CODES)
         return max(0, 100 - penalty)
 
     @property
