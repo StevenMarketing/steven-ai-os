@@ -71,6 +71,16 @@ class CompletenessTests(unittest.TestCase):
             self.assertTrue(finding.message, finding.code)
             self.assertTrue(finding.recommendation, finding.code)
 
+    def test_empty_mapping_field_is_flagged_like_missing(self):
+        # An empty {} is falsy but is neither None, str nor list: it must still
+        # be flagged as an empty required field (regression for issue #39).
+        loc = audit_location(_profile(hours={}))
+        missing = [f.field for f in loc.findings if f.code == "SEO-MISSING-FIELD"]
+        self.assertIn("hours", missing, _codes(loc))
+        self.assertTrue(all(f.severity == "high"
+                            for f in loc.findings if f.code == "SEO-MISSING-FIELD"))
+        self.assertEqual(loc.highest_severity, "high")
+
 
 class CategoryAndServiceTests(unittest.TestCase):
     def test_primary_category_off_and_suboptimal(self):

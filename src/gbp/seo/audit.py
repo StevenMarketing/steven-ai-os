@@ -259,7 +259,7 @@ def _check_completeness(profile: Dict[str, Any]) -> List[Finding]:
     for name in REQUIRED_FIELDS:
         value = profile.get(name)
         if value is None or (isinstance(value, str) and not value.strip()) \
-                or (isinstance(value, (list, tuple)) and not value):
+                or (isinstance(value, (list, tuple, dict)) and not value):
             out.append(_finding(
                 "SEO-MISSING-FIELD", "high", name,
                 f"Required profile field '{name}' is missing or empty.",
