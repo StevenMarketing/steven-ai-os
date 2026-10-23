@@ -418,12 +418,20 @@ class GoogleConnectionUiTests(unittest.TestCase):
         self.assertIn("google.noReviews", self.JS)
         self.assertIn("google.selectLocation", self.JS)
 
-    def test_no_new_api_endpoint_or_publish_path(self):
-        # the connection view must not invent an alternative Google endpoint
-        self.assertNotIn("/api/google", self.JS)
-        self.assertNotIn("/api/google", self.HTML)
-        # and it must not call Google directly
+    def test_connect_control_calls_only_our_own_routes_and_never_google_directly(self):
+        # Issue #114: the Connect control is wired through OUR OWN API -- the
+        # browser navigates to /api/google/connect and the SERVER 302s to Google
+        # (the client never holds the credentials). So the JS must reference our
+        # routes and must never call Google directly or invent a foreign host.
         self.assertNotIn("googleapis.com", self.JS)
+        self.assertNotIn("accounts.google.com", self.JS)
+        for own in ("/api/google/connect", "/api/google/connections",
+                    "/api/google/disconnect"):
+            self.assertIn(own, self.JS, msg=f"missing own route {own}")
+        # The live connect panel exists in the markup but is hidden by default,
+        # so the fixture build never shows a connect control.
+        self.assertIn('id="google-connections-panel"', self.HTML)
+        self.assertIn('id="google-connections"', self.HTML)
 
     def test_index_page_serves_the_connection_area(self):
         repo = Repository(":memory:")

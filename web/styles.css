@@ -1165,3 +1165,57 @@ tr.seo-row.selected td { background: var(--brand-tint); }
 @media (max-width: 700px) {
   .seo-head { flex-direction: column; align-items: flex-start; gap: var(--sp-1); }
 }
+
+/* ------------------------------------------------------------------ */
+/* Google live connect control (Issue #114)                            */
+/* Rendered only when the server reports live mode configured; the     */
+/* fixture build never shows it. Adzdigital accent, used sparingly.    */
+/* ------------------------------------------------------------------ */
+.google-connections { margin: var(--sp-4) 0 var(--sp-5); }
+.google-connections-table td.row-action { text-align: right; }
+.conn-state {
+  display: inline-block;
+  padding: 2px 10px;
+  border-radius: var(--r-pill);
+  font-size: var(--fs-12);
+  font-weight: 600;
+  border: 1px solid var(--line-strong);
+  background: var(--panel);
+  color: var(--muted);
+  white-space: nowrap;
+}
+.conn-state.conn-connected {
+  background: var(--ok-tint); border-color: var(--ok-line); color: var(--ok);
+}
+.conn-state.conn-token_expired {
+  background: var(--warn-tint); border-color: var(--warn-line); color: var(--warn);
+}
+.conn-state.conn-not_connected {
+  background: var(--panel); border-color: var(--line-strong); color: var(--faint);
+}
+.btn-connect,
+.btn-ghost {
+  min-height: 40px;
+  padding: var(--sp-2) var(--sp-4);
+  border-radius: var(--r-pill);
+  font-size: var(--fs-13);
+  font-weight: 600;
+  cursor: pointer;
+  border: 1px solid transparent;
+}
+.btn-connect {
+  background: var(--grad-strong);
+  color: #ffffff;
+  border-color: var(--brand);
+  box-shadow: 0 4px 12px rgba(150, 61, 241, 0.24);
+}
+.btn-connect:hover { filter: brightness(1.05); }
+.btn-ghost {
+  background: var(--panel);
+  color: var(--ink-soft);
+  border-color: var(--line-strong);
+}
+.btn-ghost:hover { border-color: var(--brand-ring); color: var(--brand-ink); }
+@media (max-width: 700px) {
+  .google-connections-table td.row-action { text-align: left; }
+}
