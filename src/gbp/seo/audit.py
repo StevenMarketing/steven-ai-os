@@ -97,7 +97,10 @@ _SEVERITY_WEIGHT: Dict[str, int] = {"high": 15, "medium": 7, "low": 3}
 #: the report and in the ordered ``actions`` list but carries no score penalty.
 #: The probable-duplicate ``SEO-IDENTITY-DUPLICATE-NAME-ZIP`` is deliberately
 #: NOT listed here: sharing name *and* ZIP keeps its high-severity penalty.
-_NON_SCORING_CODES = frozenset({"SEO-IDENTITY-REUSED-NAME"})
+#: ``SEO-HOURS-OVERNIGHT`` (a span that crosses midnight, e.g. ``22:00-02:00``)
+#: is an owner decision (issue #105): it is a low-severity note to verify, not
+#: an error, so it too is reported but never lowers the score.
+_NON_SCORING_CODES = frozenset({"SEO-IDENTITY-REUSED-NAME", "SEO-HOURS-OVERNIGHT"})
 
 _WEEKDAYS = ("monday", "tuesday", "wednesday", "thursday", "friday",
              "saturday", "sunday")
@@ -636,10 +639,7 @@ def _check_hours(profile: Dict[str, Any]) -> List[Finding]:
         # applies ONLY when the open time is a real time after 00:00 (start > 0)
         # and the close is exactly midnight, so:
         #   * 09:00-00:00 -> close read as 1440, valid (no finding);
-        #   * 00:00-00:00 -> start == 0, unchanged, still an invalid range;
-        #   * 19:00-09:00 -> unchanged, still an invalid range;
-        #   * 22:00-02:00 -> unchanged, still an invalid range: general overnight
-        #     windows are a separate owner decision and deliberately OUT of scope.
+        #   * 00:00-00:00 -> start == 0, unchanged, still an invalid range.
         if end == 0 and start is not None and start > 0:
             end = _MINUTES_PER_DAY
         if start is None or end is None:
@@ -647,11 +647,25 @@ def _check_hours(profile: Dict[str, Any]) -> List[Finding]:
                                 f"Unparseable time for {day}.",
                                 evidence=f"{day}={value!r}",
                                 recommendation="Times must be 24h HH:MM."))
-        elif start >= end:
+        elif start == end:
+            # Zero-length span: open and close are the same instant.
             out.append(_finding("SEO-HOURS-INVALID-RANGE", "medium", "hours",
                                 f"Opening time is not before closing time for {day}.",
                                 evidence=f"{day}: {value.get('open')}-{value.get('close')}",
                                 recommendation="Fix the open/close times."))
+        elif start > end:
+            # Overnight span (issue #105, owner decision 2026-10-23): both times
+            # parse and the close is earlier on the clock than the open, i.e. the
+            # span crosses midnight (22:00-02:00, 19:00-09:00). This is a valid
+            # way for a shop to stay open past midnight, so it is a low-severity
+            # NOTE to verify, not an error, and never lowers the score.
+            out.append(_finding("SEO-HOURS-OVERNIGHT", "low", "hours",
+                                f"Opening hours for {day} cross midnight; "
+                                "confirm this is intentional.",
+                                evidence=f"{day}: {value.get('open')}-{value.get('close')}",
+                                recommendation=("If the shop is deliberately open "
+                                                "past midnight, keep the span; "
+                                                "otherwise fix the open/close times.")))
     if checked and closed_days == checked:
         out.append(_finding("SEO-HOURS-ALL-CLOSED", "high", "hours",
                             "Every day is closed, so the shop never appears open.",
