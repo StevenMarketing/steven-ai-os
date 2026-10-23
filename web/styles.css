@@ -44,6 +44,10 @@
   --accent-2: #4f6df5;
   --accent-3: #963df1;
   --grad: linear-gradient(135deg, var(--accent-1) 0%, var(--accent-2) 58%, var(--accent-3) 100%);
+  /* darker accent gradient for surfaces that carry WHITE text — every stop is
+   * >=4.5:1 against #fff (4.70 / 6.06 / 4.96), unlike --grad whose first stop
+   * is only 2.85:1 */
+  --grad-strong: linear-gradient(135deg, #0077c8 0%, #4353d8 58%, #963df1 100%);
   --grad-deep: linear-gradient(135deg, #001949 0%, #0d3686 55%, #5b21b6 100%);
 
   /* semantic status — friendlier tints; meaning is never colour-alone */
@@ -503,7 +507,7 @@ code { font-family: var(--mono); font-size: 0.92em; background: var(--brand-tint
   min-height: 40px;
   padding: var(--sp-2) var(--sp-4);
   border: 1px solid var(--brand);
-  background: var(--grad);
+  background: var(--grad-strong);
   color: #fff;
   border-radius: var(--r-pill);
   cursor: pointer;
@@ -523,7 +527,7 @@ button.primary {
   min-height: 42px;
   padding: var(--sp-3) var(--sp-5);
   border: 1px solid var(--brand);
-  background: var(--grad);
+  background: var(--grad-strong);
   color: #fff;
   border-radius: var(--r-pill);
   cursor: pointer;
