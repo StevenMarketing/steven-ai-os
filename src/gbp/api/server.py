@@ -185,6 +185,7 @@ MAX_PAGE_SIZE = 100
 RBAC_ROUTE_MATRIX: Dict[Tuple[str, str], str] = {
     ("GET", "/api/locations"): "view",
     ("GET", "/api/locations/status"): "view",
+    ("GET", "/api/google/connections"): "view",
     ("GET", "/api/locations/<id>"): "view",
     ("GET", "/api/reviews"): "view",
     ("GET", "/api/reviews/<id>"): "view",
@@ -437,6 +438,33 @@ def _google_connected() -> bool:
     unconnected app must never look healthy.
     """
     return os.environ.get("GBP_GOOGLE_CONNECTED") == "1"
+
+
+def _google_connections(repo: Any) -> Dict[str, Any]:
+    """Per-business Google connection state + last sync (Issue #110, read-only).
+
+    Fixture/demo mode is the default: unless ``GBP_LIVE=1`` AND the OAuth
+    credentials are present, this returns ``live=False`` with no connections and
+    touches nothing -- behaviour identical to a build without OAuth support.
+
+    In live mode it reads the encrypted per-tenant vault and adds three fields
+    to every location row: ``connection_state`` (``not_connected`` /
+    ``connected`` / ``token_expired``), a human ``connection_label`` and the
+    ``google_last_sync_at`` timestamp. No token value is ever read here.
+    """
+    from gbp.oauth.config import live_enabled
+    if not live_enabled():
+        return {"live": False, "connections": []}
+    from gbp.oauth.config import encryption_key, load_config, vault_dir
+    from gbp.oauth.flow import connection_rows
+    from gbp.oauth.vault import TokenVault
+
+    config = load_config()
+    vault = TokenVault(
+        vault_dir(), encryption_key(),
+        client_id=config.client_id, client_secret=config.client_secret)
+    rows = connection_rows(_locations_status(repo), vault)
+    return {"live": True, "connections": rows}
 
 
 def _dashboard_metrics(repo: Any, visible: Optional[set] = None) -> Dict[str, Any]:
@@ -1411,6 +1439,18 @@ def make_handler(
                 if visible is not None:
                     rows = [r for r in rows if str(r.get("location_id")) in visible]
                 return 200, rows
+            if path == "/api/google/connections":
+                # Per-business Google connection state + last sync (Issue #110).
+                # Read-only; in fixture/demo mode it returns live=False and an
+                # empty list, so nothing changes for a build without OAuth.
+                payload = _google_connections(service.repo)
+                visible = self._visible(user) if use_auth else None
+                if visible is not None:
+                    payload["connections"] = [
+                        r for r in payload["connections"]
+                        if str(r.get("location_id")) in visible
+                    ]
+                return 200, payload
             if path == "/api/usage":
                 # Global billing/usage carries no location column, so it is an
                 # admin-only view: exposing it to a location-scoped user would
