@@ -78,16 +78,20 @@ day scored **93 instead of 100**.
 |---|---|
 | `10:00-00:00` (one day) | no finding, score 100 |
 | `09:00-00:00` (all seven days) | no findings, score 100 |
-| `19:00-09:00` | `SEO-HOURS-INVALID-RANGE` (still) |
+| `19:00-09:00` | `SEO-HOURS-OVERNIGHT` (low severity note, non-scoring) |
 | `09:00-09:00` (open == close) | `SEO-HOURS-INVALID-RANGE` (still) |
 | `00:00-00:00` | `SEO-HOURS-INVALID-RANGE` (still: open is not *after* midnight) |
-| `22:00-02:00` | `SEO-HOURS-INVALID-RANGE` (still) |
+| `22:00-02:00` | `SEO-HOURS-OVERNIGHT` (low severity note, non-scoring) |
 | malformed close (`00:0`, `25:99`) | `SEO-HOURS-MALFORMED`, unchanged |
 
-**Out of scope (owner decision).** Only an exact `00:00` close is special-cased.
-General overnight windows (e.g. `22:00-02:00`) are deliberately **not** supported
-and keep their invalid-range finding; that is a separate product decision.
-`_minutes` itself is unchanged, so the rule lives in one place — `_check_hours`.
+**Overnight windows (owner decision, 2026-10-23, issue #105).** A span whose
+open and close both parse and whose close is earlier on the clock than its open
+(e.g. `22:00-02:00`, `19:00-09:00`) crosses midnight and is a valid way for a
+shop to stay open past midnight. It is therefore **supported** as a low-severity
+non-scoring note, `SEO-HOURS-OVERNIGHT` (`low`): it is reported for a human to
+verify but never lowers the score. Only a zero-length span where `start == end`
+(e.g. `09:00-09:00`, `00:00-00:00`) stays `SEO-HOURS-INVALID-RANGE`. `_minutes`
+itself is unchanged, so the rule lives in one place — `_check_hours`.
 
 **Known divergence.** `src/gbp/seo/gap.py` has its own `_has_full_week_hours`
 helper that still treats a `00:00` close as *not* a full week of hours, so a
