@@ -496,10 +496,19 @@ def _google_connected(repo: Any = None) -> bool:
 
     * an operator assertion (``GBP_GOOGLE_CONNECTED=1``) -- the fixture/demo
       path, unchanged;
-    * in LIVE mode, the actual vault state (Issue #117): connected when at least
-      one known tenant holds a usable stored token. This is what fixes the
-      stale header chip -- before this, the chip read only the global env check
-      and stayed "not connected" after a tenant really connected.
+    * in LIVE mode, the actual vault state: connected when at least one known
+      tenant holds a usable stored token.
+
+    Issue #121: the answer is now derived from the SAME projection the Google
+    Connection row uses (:func:`_google_connections` ->
+    :func:`gbp.oauth.flow.connection_rows`) instead of a second, subtly
+    different lookup. The old chip read the tenant ONLY from
+    ``business_locations.location_name`` while the row also fell back to
+    ``tenant_id`` / ``location_id``, so a tenant whose usable token was stored
+    under its resource name (but whose ``location_name`` was blank) showed
+    "Connected" on the row and "not connected" on the chip. One source of truth
+    makes that divergence impossible -- and a NON-token ``last_error`` such as
+    ``ApiError`` never marks the connection dead.
 
     It is never inferred from "the API answered", so an unconnected app can
     never look healthy. Any failure reading the vault reports ``False``.
@@ -509,26 +518,15 @@ def _google_connected(repo: Any = None) -> bool:
     if repo is None:
         return False
     try:
-        from gbp.oauth.config import live_enabled
-        if not live_enabled():
-            return False
-        from gbp.oauth.config import encryption_key, load_config, vault_dir
-        from gbp.oauth.vault import STATE_CONNECTED, TokenVault
+        from gbp.oauth.vault import STATE_CONNECTED
 
-        config = load_config()
-        vault = TokenVault(
-            vault_dir(), encryption_key(),
-            client_id=config.client_id, client_secret=config.client_secret)
-        for row in repo.conn.execute(
-                "SELECT DISTINCT location_name FROM business_locations").fetchall():
-            tenant = row["location_name"]
-            if not tenant:
-                continue
-            if vault.connection_state(tenant) == STATE_CONNECTED:
-                return True
+        payload = _google_connections(repo)
+        return any(
+            isinstance(row, dict)
+            and str(row.get("connection_state")) == STATE_CONNECTED
+            for row in (payload.get("connections") or []))
     except Exception:  # noqa: BLE001 - an unreadable vault means "not connected"
         return False
-    return False
 
 
 def _google_connections(repo: Any) -> Dict[str, Any]:

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import unittest
 
-from gbp.client.gbp_client import GbpClient
+from gbp.client.gbp_client import GbpClient, LOCATIONS_READ_MASK
 from gbp.client.http_client import MockTransport
 from gbp.client.quota import QuotaLimiter
 from gbp.repo.sqlite_repo import Repository
@@ -65,7 +65,8 @@ class GbpClientEndpointTests(unittest.TestCase):
             "GET",
             url,
             {"locations": [{"name": "accounts/1001/locations/556"}]},
-            params={"pageSize": 100, "pageToken": "tok-loc"},
+            params={"pageSize": 100, "readMask": LOCATIONS_READ_MASK,
+                    "pageToken": "tok-loc"},
         )
         self.transport.register(
             "GET",
@@ -77,20 +78,64 @@ class GbpClientEndpointTests(unittest.TestCase):
                 ],
                 "nextPageToken": "tok-loc",
             },
-            params={"pageSize": 100},
+            params={"pageSize": 100, "readMask": LOCATIONS_READ_MASK},
         )
 
         locations = self.client.list_locations("accounts/1001")
         self.assertEqual(len(locations), 3)
-        self.assertEqual(self.transport.calls[0]["params"], {"pageSize": 100})
+        # Issue #121: readMask is present on the FIRST page and EVERY follow-up.
         self.assertEqual(
-            self.transport.calls[1]["params"], {"pageSize": 100, "pageToken": "tok-loc"}
+            self.transport.calls[0]["params"],
+            {"pageSize": 100, "readMask": LOCATIONS_READ_MASK},
+        )
+        self.assertEqual(
+            self.transport.calls[1]["params"],
+            {"pageSize": 100, "readMask": LOCATIONS_READ_MASK,
+             "pageToken": "tok-loc"},
         )
         self.assertEqual(len(self.transport.calls), 2)
 
+    def test_list_locations_sends_the_readmask_the_mapper_needs(self) -> None:
+        """Issue #121: ``locations.list`` requires ``readMask`` on every page.
+
+        The mask must cover exactly the fields ``map_location`` consumes
+        (``name``, ``title``, ``storefrontAddress``).
+        """
+        self.assertEqual(LOCATIONS_READ_MASK, "name,title,storefrontAddress")
+        url = f"{BASE}/v1/accounts/1001/locations"
+        self.transport.register("GET", url, {"locations": []})
+        self.client.list_locations("accounts/1001")
+        params = self.transport.calls[-1]["params"]
+        self.assertEqual(params["readMask"], "name,title,storefrontAddress")
+        for field in ("name", "title", "storefrontAddress"):
+            self.assertIn(field, params["readMask"])
+
+    def test_list_locations_readmask_survives_pagination(self) -> None:
+        url = f"{BASE}/v1/accounts/1001/locations"
+        # The final page (no nextPageToken) is registered FIRST with the
+        # pageToken subset so the walk stops after exactly two requests.
+        self.transport.register(
+            "GET", url,
+            {"locations": [{"name": "accounts/1001/locations/556"}]},
+            params={"pageSize": 100, "readMask": LOCATIONS_READ_MASK,
+                    "pageToken": "tok-loc"},
+        )
+        self.transport.register(
+            "GET", url,
+            {"locations": [{"name": "accounts/1001/locations/555"}],
+             "nextPageToken": "tok-loc"},
+            params={"pageSize": 100, "readMask": LOCATIONS_READ_MASK},
+        )
+        self.client.list_locations("accounts/1001")
+        self.assertEqual(len(self.transport.calls), 2)
+        for call in self.transport.calls:
+            self.assertEqual(call["params"]["readMask"], LOCATIONS_READ_MASK)
+
     def test_list_locations_accepts_bare_account_id(self) -> None:
         url = f"{BASE}/v1/accounts/1001/locations"
-        self.transport.register("GET", url, {"locations": []}, params={"pageSize": 100})
+        self.transport.register(
+            "GET", url, {"locations": []},
+            params={"pageSize": 100, "readMask": LOCATIONS_READ_MASK})
         self.client.list_locations("1001")
         self.assertEqual(self.transport.calls[-1]["url"], url)
 

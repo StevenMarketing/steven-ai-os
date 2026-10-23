@@ -32,6 +32,14 @@ DEFAULT_BASE_URL = "https://mybusiness.googleapis.com"
 LOCATIONS_PAGE_SIZE = 100
 REVIEWS_PAGE_SIZE = 50
 
+#: ``locations.list`` REQUIRES a ``readMask`` (Issue #121). Without it the live
+#: endpoint answers 400 INVALID_ARGUMENT ("field read_mask ... Field is
+#: required"); offline fake transports never enforce this, so the defect only
+#: surfaces live. The mask covers exactly the fields the mapping layer reads
+#: (:func:`gbp.sync.live_sync.map_location`): ``name``, ``title`` and
+#: ``storefrontAddress`` (postalCode / locality / administrativeArea).
+LOCATIONS_READ_MASK = "name,title,storefrontAddress"
+
 
 class GbpClient:
     """GBP API surface built on a retrying HTTP client.
@@ -81,13 +89,21 @@ class GbpClient:
         return self._request("GET", f"{self.base}/v1/accounts")
 
     def list_locations(self, account: Any) -> List[Dict[str, Any]]:
-        """Walk every page of ``GET {base}/v1/{account}/locations``."""
+        """Walk every page of ``GET {base}/v1/{account}/locations``.
+
+        ``readMask`` is sent on EVERY page request (first and every pageToken
+        follow-up): the live ``locations.list`` endpoint rejects a request
+        without one (Issue #121).
+        """
         account_name = self._account_name(account)
         url = f"{self.base}/v1/{account_name}/locations"
         results: List[Dict[str, Any]] = []
         page_token: Optional[str] = None
         while True:
-            params: Dict[str, Any] = {"pageSize": LOCATIONS_PAGE_SIZE}
+            params: Dict[str, Any] = {
+                "pageSize": LOCATIONS_PAGE_SIZE,
+                "readMask": LOCATIONS_READ_MASK,
+            }
             if page_token:
                 params["pageToken"] = page_token
             page = self._request("GET", url, params=params) or {}
