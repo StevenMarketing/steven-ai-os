@@ -56,6 +56,7 @@ from gbp.oauth.flow import (
     handle_callback,
     start_connect,
 )
+from gbp.oauth.wiring import GoogleConnectWiring
 
 __all__ = [
     "CLIENT_ID_ENV",
@@ -90,4 +91,5 @@ __all__ = [
     "disconnect",
     "handle_callback",
     "start_connect",
+    "GoogleConnectWiring",
 ]

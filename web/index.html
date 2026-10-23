@@ -415,6 +415,22 @@
               Checking Google connection readiness…
             </div>
 
+            <div class="notice" id="google-connections-notice" role="status"
+                 aria-live="polite" hidden></div>
+
+            <!-- Live connect control (Issue #114). Rendered ONLY when the server
+                 reports live mode configured (GET /api/google/connections). In
+                 the default fixture build this whole panel stays hidden, so no
+                 connect control is ever shown without live credentials. -->
+            <div class="panel-sub google-connections" id="google-connections-panel" hidden>
+              <h3 class="panel-title"
+                  id="google-connections-title">Connect Google — live</h3>
+              <p class="muted" id="google-connections-note"></p>
+              <div class="table-scroll">
+                <div id="google-connections"></div>
+              </div>
+            </div>
+
             <h3 class="panel-title" id="google-locations-title">Preview — up to five locations</h3>
             <p class="muted" id="google-preview-label">FIXTURE DATA — sample values, not read from Google.</p>
             <div class="table-scroll">

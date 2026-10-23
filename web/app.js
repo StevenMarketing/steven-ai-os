@@ -89,7 +89,22 @@
         colId: "ID",
         colRating: "Rating",
         colComment: "Comment",
-        view: "Preview reviews"
+        view: "Preview reviews",
+        // Live connect control (Issue #114). Shown ONLY when the server reports
+        // live mode configured; the default fixture build never renders it.
+        connectionsTitle: "Connect Google — live",
+        connectionsNote: "Connecting is available only in live mode. Each business is connected separately; the token is stored encrypted server-side and never shown here.",
+        connectionsEmpty: "No businesses reported for this account yet.",
+        connect: "Connect Google",
+        disconnect: "Disconnect",
+        connected: "Connected",
+        notConnected: "Not connected",
+        stateConnected: "Connected",
+        stateNotConnected: "Not connected",
+        stateExpired: "Token expired or revoked",
+        lastSync: "Last Google sync",
+        connectConnectedNotice: "Google is connected. Read-only account and location sync has run for this business.",
+        disconnectNotice: "Google connection removed for this business."
       },
       business: {
         // The Business Dashboard is an OFFLINE fixture preview: nothing here
@@ -569,10 +584,16 @@
   var state = { area: "dashboard", filters: {}, page: 1, pages: 1, total: 0,
                 selectedReview: null };
 
+  //: Set when the OAuth callback redirected back with `?google=connected`.
+  //: Captured during readUrl() (before writeUrl() rewrites the query string) and
+  //: consumed once by renderGoogleConnection() to show a one-off notice.
+  var pendingGoogleNotice = null;
+
   function readUrl() {
     var q = new URLSearchParams(window.location.search);
     var area = q.get("area");
     state.area = resolveArea(area) || "dashboard";
+    if (q.get("google") === "connected") pendingGoogleNotice = "connected";
     state.filters = {};
     FILTER_KEYS.forEach(function (k) {
       var v = q.get(k);
@@ -1984,6 +2005,16 @@
     if (label) label.textContent = t("google.fixtureLabel");
     renderGooglePreviewLocations();
     renderGoogleFixtureReviews(null);
+    // One-off notice when the OAuth callback just redirected back here.
+    if (pendingGoogleNotice === "connected") {
+      pendingGoogleNotice = null;
+      var nbox = $("google-connections-notice");
+      if (nbox) {
+        nbox.textContent = t("google.connectConnectedNotice");
+        nbox.hidden = false;
+      }
+    }
+    renderGoogleLiveConnections();
     if (!box) return;
     // Read-only: the same authenticated GET the shell already uses.
     api("GET", "/api/dashboard").then(function (data) {
@@ -1995,6 +2026,102 @@
       box.setAttribute("data-google-state", "not_ready");
       reportError(err);
     });
+  }
+
+  // --- live Google connect control (Issue #114) ---------------------- //
+  // Rendered ONLY when the server reports live mode configured
+  // (GET /api/google/connections -> live === true). In the default fixture
+  // build the whole panel stays hidden, so no connect control is ever shown
+  // without live credentials. The tenant is chosen SERVER-SIDE from the
+  // authorised location id; the browser only navigates.
+  function googleStateLabel(state) {
+    if (state === "connected") return t("google.stateConnected");
+    if (state === "token_expired") return t("google.stateExpired");
+    return t("google.stateNotConnected");
+  }
+
+  function renderGoogleLiveConnections() {
+    var panel = $("google-connections-panel");
+    var wrap = $("google-connections");
+    var note = $("google-connections-note");
+    if (!panel || !wrap) return;
+    if (note) note.textContent = t("google.connectionsNote");
+    api("GET", "/api/google/connections").then(function (payload) {
+      var live = !!(payload && payload.live === true);
+      panel.hidden = !live;
+      clearNode(wrap);
+      if (!live) return;
+      var rows = (payload && payload.connections) || [];
+      if (!rows.length) { renderEmpty(wrap, t("google.connectionsEmpty")); return; }
+      wrap.appendChild(googleConnectionsTable(rows));
+    }).catch(function (err) {
+      panel.hidden = true;
+      clearNode(wrap);
+      reportError(err);
+    });
+  }
+
+  function googleConnectionsTable(rows) {
+    var table = el("table", { cls: "grid google-connections-table" });
+    table.appendChild(el("thead", {}, [el("tr", {}, [
+      el("th", { text: t("google.colName") }),
+      el("th", { text: t("google.connected") }),
+      el("th", { text: t("google.lastSync") }),
+      el("th", { text: "" })
+    ])]));
+    var body = el("tbody");
+    rows.forEach(function (row) {
+      var st = String(row.connection_state || "not_connected");
+      var connected = st === "connected";
+      var badge = el("span", { cls: "conn-state conn-" + st,
+        text: row.connection_label || googleStateLabel(st) });
+      var action;
+      if (connected) {
+        action = el("button", { cls: "btn btn-ghost", text: t("google.disconnect"),
+          attrs: { type: "button" } });
+        action.addEventListener("click", function () { disconnectGoogle(row); });
+      } else {
+        action = el("button", { cls: "btn btn-connect", text: t("google.connect"),
+          attrs: { type: "button" } });
+        action.addEventListener("click", function () { connectGoogle(row); });
+      }
+      body.appendChild(el("tr", {}, [
+        el("td", { text: row.business_name || row.location_name || "",
+          attrs: { "data-label": t("google.colName") } }),
+        el("td", { attrs: { "data-label": t("google.connected") } }, [badge]),
+        el("td", { text: relTime(row.google_last_sync_at),
+          attrs: { "data-label": t("google.lastSync"),
+                   title: fullTime(row.google_last_sync_at) } }),
+        el("td", { cls: "row-action" }, [action])
+      ]));
+    });
+    table.appendChild(body);
+    return table;
+  }
+
+  function googleRowId(row) {
+    return row.location_id != null ? row.location_id : row.id;
+  }
+
+  function connectGoogle(row) {
+    // Top-level navigation: the server 302s to Google's consent screen.
+    var id = googleRowId(row);
+    if (id == null) return;
+    window.location.href = "/api/google/connect?location_id=" +
+      encodeURIComponent(String(id));
+  }
+
+  function disconnectGoogle(row) {
+    var id = googleRowId(row);
+    if (id == null) return;
+    var box = $("google-connections-notice");
+    api("POST", "/api/google/disconnect", { location_id: id }).then(function () {
+      if (box) {
+        box.textContent = t("google.disconnectNotice");
+        box.hidden = false;
+      }
+      renderGoogleLiveConnections();
+    }).catch(function (err) { reportError(err); });
   }
 
   // --- SEO Audit (READ-ONLY offline audit preview, issue #42) -------- //

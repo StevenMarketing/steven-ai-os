@@ -18,6 +18,10 @@ Routes (JSON in / JSON out):
     POST /api/drafts/<id>/reject          -> reject
     POST /api/drafts/<id>/publish-guard   -> dry-run guard (no side effects)
     POST /api/drafts/bulk-approve         -> bulk_approve
+    GET  /api/google/connections          -> per-business connection state (live-gated)
+    GET  /api/google/connect?location_id= -> 302 to Google (live-gated; session-scoped)
+    GET  /api/google/callback?code=&state=-> finish the flow, sync, 302 to the dashboard
+    POST /api/google/disconnect           -> drop the caller's tenant token (live-gated)
 
 Authentication (Group 5D/8A -- only active when ``auth`` is supplied):
 
@@ -212,10 +216,17 @@ MAX_PAGE_SIZE = 100
 #: permitted locations. Roles themselves map to actions in
 #: :data:`gbp.authz.models.ROLE_PERMISSIONS` (admin: all; owner/reviewer:
 #: view/edit/approve/reject, scoped to their own locations).
-RBAC_ROUTE_MATRIX: Dict[Tuple[str, str], str] = {
+RBAC_ROUTE_MATRIX: Dict[Tuple[str, str], Optional[str]] = {
     ("GET", "/api/locations"): "view",
     ("GET", "/api/locations/status"): "view",
     ("GET", "/api/google/connections"): "view",
+    # Connect/disconnect are per-location (session-scoped); the tenant is the
+    # location resource name resolved from the authorised location id.
+    ("GET", "/api/google/connect"): "view",
+    ("POST", "/api/google/disconnect"): "view",
+    # The callback is reached by Google's top-level redirect and is validated by
+    # the single-use `state` (not a session), so it carries no location action.
+    ("GET", "/api/google/callback"): None,
     ("GET", "/api/locations/<id>"): "view",
     ("GET", "/api/reviews"): "view",
     ("GET", "/api/reviews/<id>"): "view",
@@ -960,6 +971,7 @@ def make_handler(
     rate_limit: Optional[int] = None,
     rate_window: float = DEFAULT_RATE_WINDOW,
     login_limit: Optional[int] = None,
+    google_oauth: Any = None,
 ):
     """Build a ``BaseHTTPRequestHandler`` subclass bound to ``service``.
 
@@ -984,6 +996,14 @@ def make_handler(
     # cookie would be dropped by the browser and break login -- hence opt-in
     # (``GBP_COOKIE_SECURE=1``), read once so a running server is deterministic.
     secure_cookies = os.environ.get("GBP_COOKIE_SECURE") == "1"
+    # Per-server OAuth wiring (Issue #114): holds the pending connect flows and
+    # the state -> tenant index, so a connect started on one request is finished
+    # by the callback on a later one. Injecting it lets tests supply the offline
+    # token/sync transports; the default opens no socket on its own.
+    if google_oauth is None:
+        from gbp.oauth.wiring import GoogleConnectWiring
+
+        google_oauth = GoogleConnectWiring()
 
     class Handler(BaseHTTPRequestHandler):
         server_version = "GBPApprovalAPI/1.0"
@@ -1022,6 +1042,21 @@ def make_handler(
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
+
+        def _redirect(self, location: str, code: int = 302) -> None:
+            """Send a bodyless redirect, carrying the baseline security headers.
+
+            Used ONLY by the Google connect/callback routes where the Location is
+            a Google consent URL (connect) or the local dashboard (callback) --
+            never a token, code or secret beyond Google's own params.
+            """
+            self.send_response(code)
+            for name, value in self._security_headers():
+                self.send_header(name, value)
+            self.send_header("Location", location)
+            self.send_header("Content-Length", "0")
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
 
         def _serve_static(self, raw_path: str) -> None:
             """Serve a file from ``WEB_DIR``, refusing any escape (traversal)."""
@@ -1206,11 +1241,25 @@ def make_handler(
                     return self._serve_static(raw_path)
                 path = raw_path.rstrip("/") or "/"
                 query = parse_qs(parsed.query)
+                # The OAuth callback is reached by Google's top-level redirect,
+                # not by our UI: it is validated by the single-use `state`
+                # (tenant derived server-side), so it is handled before the
+                # session guard.
+                if path == "/api/google/callback":
+                    return self._handle_google_callback(query)
                 if use_auth:
                     user, token = self._guard(query)
                     if token == "\x00rejected":
                         return
+                    if path == "/api/google/connect":
+                        return self._handle_google_connect(query, user)
                     return self._send(*self._route_get(path, query, user, token))
+                # No auth configured (mock/demo): there is no session to scope a
+                # connect to, so the connect control refuses rather than guess.
+                if path == "/api/google/connect":
+                    return self._send(*_err(
+                        403, "forbidden",
+                        detail="connect requires an authenticated session"))
                 self._send(*self._route_get(path, query, None, None))
             except Exception as exc:  # noqa: BLE001
                 self._dispatch_error(exc)
@@ -1241,8 +1290,14 @@ def make_handler(
                         return self._send(
                             200, {"ok": True}, headers=[self._clear_cookie()]
                         )
+                    if path == "/api/google/disconnect":
+                        return self._handle_google_disconnect(body, user)
                     return self._send(*self._route_post(path, query, body, user))
 
+                if path == "/api/google/disconnect":
+                    return self._send(*_err(
+                        403, "forbidden",
+                        detail="disconnect requires an authenticated session"))
                 self._send(*self._route_post(path, query, body, None))
             except Exception as exc:  # noqa: BLE001
                 self._dispatch_error(exc)
@@ -1304,6 +1359,107 @@ def make_handler(
                 "expires_at": auth.expires_at(token),
             }
             self._send(200, payload, headers=[self._session_cookie(token, ttl=auth.ttl)])
+
+        # ---------------------------------------------------------------- #
+        # Google connect / callback / disconnect (Issue #114)
+        # ---------------------------------------------------------------- #
+        def _session_tenant(self, user: Any, raw_location_id: Any):
+            """Resolve the tenant (a location resource name) for the caller.
+
+            ``location_id`` is only a LOOKUP key: it is authorised against the
+            session (admin: any; scoped user: own locations only) before the
+            resource name is read from the DB. It is never trusted on its own,
+            so a caller cannot connect a location they cannot see. Returns
+            ``(tenant, None)`` or ``(None, error_tuple)``.
+            """
+            if raw_location_id is None or not _valid_id(raw_location_id):
+                return None, _err(400, "invalid_request",
+                                  detail="location_id is required")
+            if not auth.authorize(user, "view", raw_location_id):
+                return None, _err(403, "forbidden",
+                                  detail=f"no access to location {raw_location_id!r}")
+            row = service.repo.conn.execute(
+                "SELECT location_name FROM business_locations WHERE id = ?",
+                (_as_int(raw_location_id),)).fetchone()
+            if row is None:
+                return None, _err(404, "not_found",
+                                  detail=f"location not found: {raw_location_id!r}")
+            try:
+                from gbp.oauth.tenancy import normalize_tenant
+
+                return normalize_tenant(row["location_name"]), None
+            except Exception:  # noqa: BLE001 - an unusable resource id fails closed
+                return None, _err(404, "not_found",
+                                  detail=f"location not found: {raw_location_id!r}")
+
+        def _handle_google_connect(self, query: Dict[str, Any], user: Any) -> None:
+            """GET /api/google/connect -> 302 to Google, or an honest refusal."""
+            from gbp.oauth.config import LiveNotConfigured, live_enabled
+
+            if not live_enabled():
+                # Fixture/demo build: refuse plainly, never fake a redirect.
+                return self._send(*_err(
+                    409, "live_not_configured",
+                    detail="live connection is not configured"))
+            tenant, err = self._session_tenant(user, _first(query, "location_id"))
+            if err is not None:
+                return self._send(*err)
+            try:
+                flow = google_oauth.start(tenant)
+            except LiveNotConfigured as exc:
+                return self._send(*_err(409, "live_not_configured", detail=str(exc)))
+            # 302 to the Google consent URL (state + nonce stored server-side).
+            return self._redirect(flow["authorization_url"])
+
+        def _handle_google_callback(self, query: Dict[str, Any]) -> None:
+            """GET /api/google/callback -> finish the flow, then 302 to the app.
+
+            Reached by Google's top-level redirect, so it is NOT session-gated:
+            it is validated by the single-use ``state`` (the tenant is derived
+            server-side, never from a URL parameter).
+            """
+            from gbp.oauth.config import LiveNotConfigured, live_enabled
+            from gbp.oauth.flow import OAuthExchangeError
+            from gbp.oauth.state import FlowStateError
+
+            if not live_enabled():
+                return self._send(*_err(
+                    409, "live_not_configured",
+                    detail="live connection is not configured"))
+            if _first(query, "error"):
+                # Google reported a denial/error on the consent screen.
+                return self._send(*_err(
+                    400, "oauth_denied", detail="authorization was not granted"))
+            code = _first(query, "code") or ""
+            state = _first(query, "state") or ""
+            try:
+                google_oauth.callback(code=code, state=state)
+            except FlowStateError as exc:
+                return self._send(*_err(400, "oauth_failed", reason=exc.reason))
+            except OAuthExchangeError as exc:
+                return self._send(*_err(400, "oauth_failed", reason=exc.reason))
+            except LiveNotConfigured as exc:
+                return self._send(*_err(409, "live_not_configured", detail=str(exc)))
+            # Success: land back on the dashboard's Google area with a
+            # non-secret notice (area + flag only -- never a token or code).
+            return self._redirect("/?area=google&google=connected")
+
+        def _handle_google_disconnect(self, body: Dict[str, Any], user: Any) -> None:
+            """POST /api/google/disconnect -> drop the caller's tenant token."""
+            from gbp.oauth.config import LiveNotConfigured, live_enabled
+
+            if not live_enabled():
+                return self._send(*_err(
+                    409, "live_not_configured",
+                    detail="live connection is not configured"))
+            tenant, err = self._session_tenant(user, body.get("location_id"))
+            if err is not None:
+                return self._send(*err)
+            try:
+                result = google_oauth.disconnect(tenant)
+            except LiveNotConfigured as exc:
+                return self._send(*_err(409, "live_not_configured", detail=str(exc)))
+            return self._send(200, dict(result))
 
         # ---------------------------------------------------------------- #
         # authorization helpers
@@ -1744,15 +1900,19 @@ def create_server(
     rate_limit: Optional[int] = None,
     rate_window: float = DEFAULT_RATE_WINDOW,
     login_limit: Optional[int] = None,
+    google_oauth: Any = None,
 ) -> ThreadingHTTPServer:
     """Create (but do not start) a threaded HTTP server bound to ``host:port``.
 
     Defaults to ``127.0.0.1`` and ``port=0`` (ephemeral) so tests can start it
     in-process. The real bound port is ``server.server_address[1]``. Pass
-    ``auth`` to enable authenticated/authorized mode.
+    ``auth`` to enable authenticated/authorized mode. Pass ``google_oauth`` (a
+    :class:`gbp.oauth.wiring.GoogleConnectWiring`) to inject the offline OAuth
+    transports the connect/callback/disconnect routes use.
     """
     handler = make_handler(
         service, auth=auth, rate_limit=rate_limit,
         rate_window=rate_window, login_limit=login_limit,
+        google_oauth=google_oauth,
     )
     return ThreadingHTTPServer((host, port), handler)
