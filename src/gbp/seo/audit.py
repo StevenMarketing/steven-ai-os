@@ -912,6 +912,176 @@ def _check_reviews(profile: Dict[str, Any]) -> List[Finding]:
 
 
 # --------------------------------------------------------------------------
+# Tier 2 check groups (issue #108): attributes, booking link, special hours
+# and the local-mention signal. All four are additive; only the informational
+# codes in ``_NON_SCORING_CODES`` (e.g. ``SEO-HOURS-OVERNIGHT``) are excluded
+# from the completeness score.
+# --------------------------------------------------------------------------
+def _check_attributes(profile: Dict[str, Any]) -> List[Finding]:
+    """Attribute checks (issue #108): optional ``attributes`` list.
+
+    A listing that sets no attributes (absent or empty) has a low-severity gap:
+    attributes are how customers filter (walk-ins welcome, women-owned,
+    parking). Anything that is not a list of strings is reported as
+    ``SEO-PROFILE-MALFORMED`` -- exactly like the other groups -- so malformed
+    attribute data is reported rather than guessed and never crashes the audit.
+    """
+    value = profile.get("attributes")
+    if value is None:
+        return [_finding(
+            "SEO-ATTRIBUTES-EMPTY", "low", "attributes",
+            "No profile attributes are set.",
+            evidence="attributes=<absent>",
+            recommendation=("Add the attributes that really describe the shop "
+                            "(e.g. walk-ins welcome, women-owned, wheelchair "
+                            "accessible, parking) so customers can find and "
+                            "filter for it."))]
+    try:
+        attributes = _as_list(value)
+    except ValueError as exc:
+        return [_finding(
+            "SEO-PROFILE-MALFORMED", "medium", "attributes",
+            "attributes is not a list.", evidence=str(exc),
+            recommendation="Store the field as a JSON array of strings.")]
+    if not attributes:
+        return [_finding(
+            "SEO-ATTRIBUTES-EMPTY", "low", "attributes",
+            "No profile attributes are set.",
+            evidence="attributes=[]",
+            recommendation=("Add the attributes that really describe the shop "
+                            "(e.g. walk-ins welcome, women-owned, wheelchair "
+                            "accessible, parking) so customers can find and "
+                            "filter for it."))]
+    return []
+
+
+def _check_booking(profile: Dict[str, Any]) -> List[Finding]:
+    """Booking/appointment-link check (issue #108): optional ``booking_url``.
+
+    Only judged when the profile already has a website: a shop with a site but
+    no booking link loses the customers who prefer to book online. A
+    present-but-malformed value (not an http(s)/www URL) is reported as the same
+    finding, with the bad value quoted in the evidence. When the website itself
+    is missing the completeness check owns it and this check stays silent.
+    """
+    website = profile.get("website")
+    if _is_blank(website):
+        return []
+    booking = _norm(profile.get("booking_url"))
+    if not booking:
+        return [_finding(
+            "SEO-BOOKING-MISSING", "low", "booking_url",
+            "The profile has a website but no appointment/booking link.",
+            evidence="booking_url=<absent>",
+            recommendation=("Add a booking or appointment link so customers can "
+                            "book online instead of only calling."))]
+    if not _URL_RE.search(booking):
+        return [_finding(
+            "SEO-BOOKING-MISSING", "low", "booking_url",
+            "The booking link is not a valid URL.",
+            evidence=f"booking_url={booking!r}",
+            recommendation=("Set booking_url to a full http(s) link to the "
+                            "booking or appointment page."))]
+    return []
+
+
+def _check_special_hours(profile: Dict[str, Any]) -> List[Finding]:
+    """Special/holiday-hours check (issue #108): optional ``special_hours``.
+
+    Absent (or empty) special hours are a low-severity gap -- the
+    recommendation points at major US holidays. When the field is present it is
+    validated with the same range rules as regular hours (``_check_hours``): a
+    zero-length span is ``SEO-HOURS-INVALID-RANGE`` and a span that crosses
+    midnight is the informational ``SEO-HOURS-OVERNIGHT`` note (issue #105
+    semantics). The findings carry ``field="special_hours"`` so they stay
+    distinguishable from the regular-hours ones; the validated codes are reused
+    from the hours group rather than duplicated.
+    """
+    value = profile.get("special_hours")
+    if value is None or (isinstance(value, dict) and not value):
+        return [_finding(
+            "SEO-SPECIAL-HOURS-UNSET", "low", "special_hours",
+            "No special/holiday hours are set.",
+            evidence="special_hours=<absent>",
+            recommendation=("Set special hours around major US holidays so "
+                            "customers are not turned away by the regular "
+                            "opening hours."))]
+    if not isinstance(value, dict):
+        return [_finding(
+            "SEO-PROFILE-MALFORMED", "medium", "special_hours",
+            "special_hours is not a mapping of date -> interval.",
+            evidence=type(value).__name__,
+            recommendation="Provide special_hours as date -> {open, close}.")]
+    out: List[Finding] = []
+    for day in sorted(value):
+        entry = value[day]
+        if entry in (None, "closed", "Closed"):
+            continue
+        if not isinstance(entry, dict):
+            out.append(_finding(
+                "SEO-HOURS-MALFORMED", "medium", "special_hours",
+                f"Invalid special-hours entry for {day}.",
+                evidence=f"{day}={entry!r}",
+                recommendation="Use {open:'HH:MM', close:'HH:MM'}."))
+            continue
+        start = _minutes(str(entry.get("open") or ""))
+        end = _minutes(str(entry.get("close") or ""))
+        # Midnight close is the end of the day (issue #98 rule, reused).
+        if end == 0 and start is not None and start > 0:
+            end = _MINUTES_PER_DAY
+        if start is None or end is None:
+            out.append(_finding(
+                "SEO-HOURS-MALFORMED", "medium", "special_hours",
+                f"Unparseable time for special hours on {day}.",
+                evidence=f"{day}={entry!r}",
+                recommendation="Times must be 24h HH:MM."))
+        elif start == end:
+            out.append(_finding(
+                "SEO-HOURS-INVALID-RANGE", "medium", "special_hours",
+                f"Opening time is not before closing time for {day}.",
+                evidence=f"{day}: {entry.get('open')}-{entry.get('close')}",
+                recommendation="Fix the special open/close times."))
+        elif start > end:
+            out.append(_finding(
+                "SEO-HOURS-OVERNIGHT", "low", "special_hours",
+                f"Special hours for {day} cross midnight; confirm this is "
+                "intentional.",
+                evidence=f"{day}: {entry.get('open')}-{entry.get('close')}",
+                recommendation=("If the shop is deliberately open past "
+                                "midnight on that date, keep the span; "
+                                "otherwise fix the times.")))
+    return out
+
+
+def _check_local_mention(profile: Dict[str, Any]) -> List[Finding]:
+    """Local-mention signal (issue #108): does the description name the area?
+
+    Informational, case-insensitive and purely offline: when the description is
+    present and names neither the profile's city nor its state, it is flagged as
+    ``SEO-DESCRIPTION-NO-LOCAL``. The recommendation only asks to mention the
+    city *naturally* -- never to stuff the description with place names. The
+    check is skipped when the description is missing (completeness owns that) or
+    when the profile carries no city/state to compare against.
+    """
+    raw = profile.get("description")
+    if raw is None or not str(raw).strip():
+        return []
+    desc_stems = _stems(raw)
+    localities = [(_norm(profile.get(field)), field)
+                  for field in ("city", "state") if _norm(profile.get(field))]
+    if not localities:
+        return []
+    if any(_mentions(desc_stems, text) for text, _field in localities):
+        return []
+    return [_finding(
+        "SEO-DESCRIPTION-NO-LOCAL", "low", "description",
+        "The description never names the shop's city or state.",
+        evidence="locality=" + ", ".join(text for text, _f in localities),
+        recommendation=("Mention your city or area naturally in the description "
+                        "so customers can tell where you are."))]
+
+
+# --------------------------------------------------------------------------
 # per-location and whole-account entry points
 # --------------------------------------------------------------------------
 def audit_location(profile: Dict[str, Any]) -> LocationAudit:
@@ -928,6 +1098,10 @@ def audit_location(profile: Dict[str, Any]) -> LocationAudit:
     findings += _check_hours(profile)
     findings += _check_photos(profile)
     findings += _check_reviews(profile)
+    findings += _check_attributes(profile)
+    findings += _check_booking(profile)
+    findings += _check_special_hours(profile)
+    findings += _check_local_mention(profile)
     return LocationAudit(
         location_name=_norm(profile.get("location_name")),
         title=_norm(profile.get("title")),
@@ -1018,6 +1192,9 @@ DEFAULT_PROFILES: List[Dict[str, Any]] = [
         "phone": "+1 714-555-0142",
         "website": "https://example.invalid/demo-nails",
         "photos": {"total": 24, "exterior": 6, "interior": 8, "work": 10},
+        "attributes": ["Walk-ins welcome", "Women-owned"],
+        "booking_url": "https://example.invalid/demo-nails/book",
+        "special_hours": {"2026-12-25": {"open": "10:00", "close": "16:00"}},
         "_fixture": True,
     },
     {

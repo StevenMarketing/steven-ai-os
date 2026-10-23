@@ -30,6 +30,10 @@ no competitor data and makes no ranking claim.
 | Hours | `SEO-HOURS-DAY-MISSING`, `-MALFORMED`, `-INVALID-RANGE`, `-ALL-CLOSED` | a close of `00:00` is read as `24:00` (see *Midnight close* below) |
 | Photos | `SEO-PHOTOS-NONE`, `SEO-PHOTOS-TOO-FEW`, `SEO-PHOTOS-NO-EXTERIOR`, `-NO-INTERIOR`, `-NO-WORK` | optional `photos` field; not a required field (see *Photos & review health* below) |
 | Review health | `SEO-REVIEWS-LOW-RATING`, `SEO-REVIEWS-TOO-FEW`, `SEO-REVIEWS-UNANSWERED` | optional review fields; each check is silent when its field is absent |
+| Attributes | `SEO-ATTRIBUTES-EMPTY` | optional `attributes` list; absent/empty -> flagged (see *Tier 2* below) |
+| Booking link | `SEO-BOOKING-MISSING` | optional `booking_url`; judged only when the profile has a website |
+| Special/holiday hours | `SEO-SPECIAL-HOURS-UNSET` | optional `special_hours` mapping; validated with the regular-hours range rules |
+| Local mention | `SEO-DESCRIPTION-NO-LOCAL` | the description names neither the profile city nor state |
 | Identity (cross-location) | `SEO-IDENTITY-REUSED-NAME`, `SEO-IDENTITY-DUPLICATE-NAME-ZIP` | mirrors the dashboard convention: name + ZIP |
 | Malformed input | `SEO-PROFILE-MALFORMED` | a wrong-typed field is reported, never invented |
 
@@ -38,10 +42,11 @@ Every finding carries `code`, `severity` (`high`/`medium`/`low`), `field`,
 code, then field, so the output is stable. Each location gets a deterministic
 0-100 completeness `score` (100 − 15·high − 7·medium − 3·low, floored at 0).
 
-One finding is informational and does **not** affect the score:
+Two findings are informational and do **not** affect the score:
 `SEO-IDENTITY-REUSED-NAME` (same name across locations with distinct ZIPs — normal
-for a chain) is still reported and still appears in the actions list, but its
-penalty is excluded from the score. The probable-duplicate
+for a chain) and `SEO-HOURS-OVERNIGHT` (a span that crosses midnight, issue #105).
+Both are still reported and still appear in the actions list, but their penalty is
+excluded from the score. The probable-duplicate
 `SEO-IDENTITY-DUPLICATE-NAME-ZIP` keeps its full `high` penalty. The exclusion is
 declared once in `_NON_SCORING_CODES` in `src/gbp/seo/audit.py`.
 
@@ -114,6 +119,51 @@ public `photo_total(profile)` helper (the tolerant parse used above) so the gap
 analysis benchmarks photo counts from the same rule and the two can never
 disagree.
 
+## Tier 2 (issue #108)
+
+Four additive, purely offline checks. Unlike the review data, these fields are
+part of the profile the salon controls, so their absence is a (low-severity)
+gap. Every finding here scores normally unless noted; only the informational
+codes in `_NON_SCORING_CODES` are excluded.
+
+**Attributes** — the profile gains an optional `attributes` list (e.g. walk-ins
+welcome, women-owned, parking). Setting no attributes loses the customers who
+filter for them.
+
+**Booking link** — an optional `booking_url`. Only judged when the profile also
+has a website: a shop with a site but no booking link is flagged, and a
+present-but-malformed value (not an `http(s)`/`www` URL) is the same finding
+with the bad value quoted. When the website itself is missing, the completeness
+check owns it and this check stays silent.
+
+**Special/holiday hours** — an optional `special_hours` mapping of
+`date -> {open, close}` (a `"closed"` value is accepted and ignored). When the
+field is present it is validated with the **same range rules as regular hours**:
+a zero-length span is `SEO-HOURS-INVALID-RANGE` and a midnight-crossing span is
+the informational `SEO-HOURS-OVERNIGHT` (issue #105, never lowers the score).
+The findings carry `field="special_hours"` so they stay distinguishable from the
+regular-hours ones; the codes are reused rather than duplicated.
+
+**Local mention** — a case-insensitive, offline signal: when the description is
+present but names neither the profile **city** nor **state**, it is flagged. The
+recommendation only asks to mention the city *naturally* — never to repeat or
+stuff place names. The check is skipped when the description is missing (the
+completeness check owns that) or when the profile carries no city/state.
+
+| Condition | Finding | Severity |
+|---|---|---|
+| `attributes` absent or empty | `SEO-ATTRIBUTES-EMPTY` | `low` |
+| `booking_url` absent while a website is present | `SEO-BOOKING-MISSING` | `low` |
+| `booking_url` present but not a URL | `SEO-BOOKING-MISSING` | `low` |
+| `special_hours` absent or empty | `SEO-SPECIAL-HOURS-UNSET` | `low` |
+| special-hours entry with `open == close` | `SEO-HOURS-INVALID-RANGE` (`field=special_hours`) | `medium` |
+| special-hours entry crossing midnight | `SEO-HOURS-OVERNIGHT` (`field=special_hours`) | `low` (non-scoring) |
+| description names neither city nor state | `SEO-DESCRIPTION-NO-LOCAL` | `low` |
+| wrong-typed `attributes` / `special_hours` | `SEO-PROFILE-MALFORMED` | `medium` |
+
+Malformed attribute or special-hours data is reported (`SEO-PROFILE-MALFORMED`)
+and never crashes the audit.
+
 ## Midnight close (issue #98)
 
 `00:00` on the **close** side is midnight at the *end* of the day, so
@@ -179,14 +229,14 @@ Example (synthetic demo account, trimmed):
   "source": "synthetic-fixture",
   "disclaimer": "Offline audit of synthetic Google Business Profile fixtures. ...",
   "location_count": 2,
-  "total_findings": 14,
+  "total_findings": 18,
   "duplicate_names": {
     "demo nails": ["accounts/1001/locations/loc-001", "accounts/1001/locations/loc-002"]
   },
   "locations": [
     {
       "location_name": "accounts/1001/locations/loc-002",
-      "score": 28,
+      "score": 23,
       "highest_severity": "medium",
       "findings": [
         {
@@ -217,8 +267,9 @@ Example (synthetic demo account, trimmed):
 cd /opt/data/gbp-integration && PYTHONPATH=src python3 -m unittest tests.test_seo_audit
 ```
 
-69 tests: completeness, categories/services, description, hours (including the
-issue #98 midnight-close rule), photos and review health (issue #107), duplicate
+102 tests: completeness, categories/services, description, hours (including the
+issue #98 midnight-close rule), photos and review health (issue #107), Tier 2
+attributes/booking-link/special-hours/local-mention (issue #108), duplicate
 name/ZIP, reused-name non-scoring behaviour, description <-> services coherence,
 empty and malformed fixtures, deterministic JSON, prioritised actions, deep-copy
 fixtures, and an explicit **no-network guard** (sockets patched to raise and a

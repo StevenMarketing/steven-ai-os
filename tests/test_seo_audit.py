@@ -37,17 +37,22 @@ def _profile(**overrides):
         "primary_category": "Nail Salon",
         "secondary_categories": ["Manicure", "Pedicure"],
         "services": ["Manicure", "Pedicure", "Gel Nails"],
-        "description": ("Fixture Nails is a synthetic shop used only for offline "
-                        "tests. It lists manicures, pedicures and gel nails and "
-                        "a short paragraph so the length checks have something "
-                        "realistic to measure without any real customer or "
-                        "business data appearing anywhere in this file or in the "
-                        "report."),
+        "description": ("Fixture Nails is a synthetic shop in Garden Grove used "
+                        "only for offline tests. It lists manicures, pedicures "
+                        "and gel nails and a short paragraph so the length "
+                        "checks have something realistic to measure without any "
+                        "real customer or business data appearing anywhere in "
+                        "this file or in the report."),
         "hours": {day: {"open": "09:00", "close": "19:00"} for day in seo._WEEKDAYS},
         "phone": "+1 714-555-0100",
         "website": "https://example.invalid/fixture",
         # A complete shop carries photos (issue #107); tests override as needed.
         "photos": {"total": 24, "exterior": 8, "interior": 8, "work": 8},
+        # Tier 2 (issue #108): a complete shop also sets attributes, a booking
+        # link and (valid) special hours, so the new checks stay silent.
+        "attributes": ["Walk-ins welcome", "Women-owned"],
+        "booking_url": "https://example.invalid/fixture/book",
+        "special_hours": {"2026-12-25": {"open": "10:00", "close": "16:00"}},
     }
     base.update(overrides)
     return base
@@ -578,6 +583,198 @@ class ReviewHealthTests(unittest.TestCase):
         self.assertEqual(loc.score, 100 - 7 - 3 - 7)
         for code in self._REVIEW_CODES:
             self.assertNotIn(code, seo._NON_SCORING_CODES)
+
+
+class AttributeTests(unittest.TestCase):
+    """Issue #108: attributes check (new field ``attributes``)."""
+
+    def test_complete_profile_has_attributes_silent(self):
+        codes = _codes(audit_location(_profile()))
+        self.assertNotIn("SEO-ATTRIBUTES-EMPTY", codes)
+
+    def test_absent_attributes_is_a_low_finding(self):
+        profile = _profile()
+        del profile["attributes"]
+        loc = audit_location(profile)
+        finding = [f for f in loc.findings if f.code == "SEO-ATTRIBUTES-EMPTY"]
+        self.assertEqual(len(finding), 1, _codes(loc))
+        self.assertEqual(finding[0].severity, "low")
+        self.assertEqual(finding[0].field, "attributes")
+        self.assertTrue(finding[0].recommendation)
+        self.assertEqual(loc.score, 97)          # low penalty 3, scores normally
+
+    def test_empty_or_blank_attributes_are_flagged(self):
+        for value in ([], ["   "], [""]):
+            with self.subTest(attributes=value):
+                loc = audit_location(_profile(attributes=value))
+                self.assertIn("SEO-ATTRIBUTES-EMPTY", _codes(loc))
+
+    def test_present_attributes_are_silent(self):
+        loc = audit_location(_profile(attributes=["Walk-ins welcome"]))
+        self.assertNotIn("SEO-ATTRIBUTES-EMPTY", _codes(loc))
+
+    def test_malformed_attributes_route_to_profile_malformed(self):
+        for value in (1234, {"walk_ins": True}, True, 3.5):
+            with self.subTest(attributes=value):
+                loc = audit_location(_profile(attributes=value))
+                self.assertIn("SEO-PROFILE-MALFORMED", _codes(loc))
+                self.assertNotIn("SEO-ATTRIBUTES-EMPTY", _codes(loc))
+
+    def test_attributes_finding_scores_normally(self):
+        self.assertNotIn("SEO-ATTRIBUTES-EMPTY", seo._NON_SCORING_CODES)
+
+
+class BookingLinkTests(unittest.TestCase):
+    """Issue #108: booking-link check (new field ``booking_url``)."""
+
+    def test_complete_profile_has_booking_silent(self):
+        self.assertNotIn("SEO-BOOKING-MISSING", _codes(audit_location(_profile())))
+
+    def test_website_without_booking_is_low(self):
+        for value in (None, "", "   "):
+            with self.subTest(booking_url=value):
+                loc = audit_location(_profile(booking_url=value))
+                finding = [f for f in loc.findings
+                           if f.code == "SEO-BOOKING-MISSING"]
+                self.assertEqual(len(finding), 1, _codes(loc))
+                self.assertEqual(finding[0].severity, "low")
+                self.assertEqual(finding[0].field, "booking_url")
+        profile = _profile()
+        del profile["booking_url"]
+        self.assertIn("SEO-BOOKING-MISSING", _codes(audit_location(profile)))
+
+    def test_malformed_booking_url_is_the_same_finding(self):
+        loc = audit_location(_profile(booking_url="call us to book"))
+        finding = [f for f in loc.findings if f.code == "SEO-BOOKING-MISSING"]
+        self.assertEqual(len(finding), 1, _codes(loc))
+        self.assertIn("call us to book", finding[0].evidence)
+
+    def test_valid_booking_url_is_silent(self):
+        for value in ("https://example.invalid/book", "http://x.invalid/b",
+                      "www.example.invalid/book"):
+            with self.subTest(booking_url=value):
+                self.assertNotIn("SEO-BOOKING-MISSING",
+                                 _codes(audit_location(_profile(booking_url=value))))
+
+    def test_no_website_keeps_the_check_silent(self):
+        # A missing website belongs to the completeness check, not here.
+        loc = audit_location(_profile(website=None, booking_url=None))
+        self.assertNotIn("SEO-BOOKING-MISSING", _codes(loc))
+        self.assertIn("website", [f.field for f in loc.findings
+                                  if f.code == "SEO-MISSING-FIELD"])
+
+    def test_booking_finding_scores_normally(self):
+        loc = audit_location(_profile(booking_url=None))
+        self.assertEqual(loc.score, 97)
+        self.assertNotIn("SEO-BOOKING-MISSING", seo._NON_SCORING_CODES)
+
+
+class SpecialHoursTests(unittest.TestCase):
+    """Issue #108: special/holiday-hours check (new field ``special_hours``)."""
+
+    def test_complete_profile_has_special_hours_silent(self):
+        codes = _codes(audit_location(_profile()))
+        self.assertNotIn("SEO-SPECIAL-HOURS-UNSET", codes)
+        self.assertNotIn("SEO-HOURS-MALFORMED", codes)
+
+    def test_absent_special_hours_is_a_low_finding(self):
+        profile = _profile()
+        del profile["special_hours"]
+        loc = audit_location(profile)
+        finding = [f for f in loc.findings
+                   if f.code == "SEO-SPECIAL-HOURS-UNSET"]
+        self.assertEqual(len(finding), 1, _codes(loc))
+        self.assertEqual(finding[0].severity, "low")
+        self.assertEqual(finding[0].field, "special_hours")
+        self.assertEqual(loc.score, 97)          # low penalty 3
+
+    def test_empty_mapping_is_treated_as_unset(self):
+        loc = audit_location(_profile(special_hours={}))
+        self.assertIn("SEO-SPECIAL-HOURS-UNSET", _codes(loc))
+
+    def test_malformed_special_hours_is_profile_malformed(self):
+        loc = audit_location(_profile(special_hours=["2026-12-25"]))
+        self.assertIn("SEO-PROFILE-MALFORMED", _codes(loc))
+        self.assertNotIn("SEO-SPECIAL-HOURS-UNSET", _codes(loc))
+
+    def test_special_hours_entries_use_the_regular_range_rules(self):
+        cases = {
+            "SEO-HOURS-INVALID-RANGE": {"open": "09:00", "close": "09:00"},
+            "SEO-HOURS-MALFORMED": {"open": "09:00", "close": "not-a-time"},
+            "SEO-HOURS-OVERNIGHT": {"open": "22:00", "close": "02:00"},
+        }
+        for code, entry in cases.items():
+            with self.subTest(code=code):
+                loc = audit_location(_profile(
+                    special_hours={"2026-07-04": entry}))
+                finding = [f for f in loc.findings if f.code == code]
+                self.assertEqual(len(finding), 1, _codes(loc))
+                self.assertEqual(finding[0].field, "special_hours")
+
+    def test_valid_special_hours_entry_is_silent(self):
+        loc = audit_location(_profile(
+            special_hours={"2026-12-25": {"open": "10:00", "close": "16:00"}}))
+        self.assertNotIn("SEO-HOURS-INVALID-RANGE", _codes(loc))
+        self.assertNotIn("SEO-HOURS-MALFORMED", _codes(loc))
+        self.assertEqual(loc.score, 100)
+
+    def test_overnight_special_hours_is_a_non_scoring_note(self):
+        loc = audit_location(_profile(
+            special_hours={"2026-01-01": {"open": "22:00", "close": "02:00"}}))
+        self.assertIn("SEO-HOURS-OVERNIGHT", _codes(loc))
+        self.assertEqual(loc.score, 100)
+
+    def test_closed_special_entry_is_silent(self):
+        loc = audit_location(_profile(special_hours={"2026-07-04": "closed"}))
+        self.assertNotIn("SEO-HOURS-MALFORMED", _codes(loc))
+
+
+class LocalMentionTests(unittest.TestCase):
+    """Issue #108: the description local-mention signal (informational)."""
+
+    #: A length-valid description that names no city or state.
+    _NO_LOCAL = ("A synthetic nail studio serving walk-in customers all week "
+                 "with manicures, pedicures and gel nails in a calm, hygienic "
+                 "space. " * 3)
+
+    def test_description_naming_neither_city_nor_state_is_flagged(self):
+        loc = audit_location(_profile(description=self._NO_LOCAL))
+        finding = [f for f in loc.findings
+                   if f.code == "SEO-DESCRIPTION-NO-LOCAL"]
+        self.assertEqual(len(finding), 1, _codes(loc))
+        self.assertEqual(finding[0].severity, "low")
+        self.assertEqual(finding[0].field, "description")
+
+    def test_city_mention_is_case_insensitive(self):
+        loc = audit_location(_profile(
+            description=self._NO_LOCAL + " Visit us in garden grove."))
+        self.assertNotIn("SEO-DESCRIPTION-NO-LOCAL", _codes(loc))
+
+    def test_state_only_mention_is_enough(self):
+        loc = audit_location(_profile(
+            description=self._NO_LOCAL + " Proudly serving CA."))
+        self.assertNotIn("SEO-DESCRIPTION-NO-LOCAL", _codes(loc))
+
+    def test_missing_description_is_silent(self):
+        loc = audit_location(_profile(description=None))
+        self.assertNotIn("SEO-DESCRIPTION-NO-LOCAL", _codes(loc))
+
+    def test_no_locality_to_compare_is_silent(self):
+        loc = audit_location(_profile(city=None, state=None,
+                                      description=self._NO_LOCAL))
+        self.assertNotIn("SEO-DESCRIPTION-NO-LOCAL", _codes(loc))
+
+    def test_recommendation_never_advises_stuffing(self):
+        loc = audit_location(_profile(description=self._NO_LOCAL))
+        finding = [f for f in loc.findings
+                   if f.code == "SEO-DESCRIPTION-NO-LOCAL"][0]
+        text = finding.recommendation.lower()
+        self.assertIn("naturally", text)
+        for phrase in ("stuff", "keyword", "repeat", "as often as"):
+            self.assertNotIn(phrase, text)
+
+    def test_local_mention_finding_scores_normally(self):
+        self.assertNotIn("SEO-DESCRIPTION-NO-LOCAL", seo._NON_SCORING_CODES)
 
 
 class IdentityTests(unittest.TestCase):
