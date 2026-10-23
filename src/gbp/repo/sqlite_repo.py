@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 __all__ = ["Repository"]
 
@@ -69,7 +69,31 @@ class Repository:
                 " SELECT l.location_name FROM business_locations l"
                 " WHERE sync_runs.run_key LIKE l.location_name || '%' LIMIT 1)"
                 " WHERE location_id IS NULL")
+        # Additive migration (Issue #112): google_accounts predates the
+        # business-group projection, so it carried only the account resource
+        # name. The display name + type are added in place (nothing is dropped);
+        # existing rows keep NULL and are reported as "Ungrouped" by the
+        # projection rather than guessing a group.
+        self._ensure_account_columns()
         self.conn.commit()
+
+    def _ensure_account_columns(self) -> None:
+        """Add ``account_name`` / ``account_type`` to ``google_accounts`` once.
+
+        Idempotent and non-destructive: a database created before Issue #112
+        gains the two nullable columns in place; an unknown/absent table is left
+        untouched.
+        """
+        cols = {row[1] for row in self.conn.execute(
+            "PRAGMA table_info(google_accounts)")}
+        if not cols:
+            return
+        if "account_name" not in cols:
+            self.conn.execute(
+                "ALTER TABLE google_accounts ADD COLUMN account_name TEXT")
+        if "account_type" not in cols:
+            self.conn.execute(
+                "ALTER TABLE google_accounts ADD COLUMN account_type TEXT")
 
     def close(self) -> None:
         self.conn.close()
@@ -77,18 +101,56 @@ class Repository:
     # ------------------------------------------------------------------ #
     # accounts / locations
     # ------------------------------------------------------------------ #
-    def upsert_account(self, name: str) -> int:
-        """Insert account ``name`` or return the existing row's id."""
+    def upsert_account(self, name: str, account_name: Optional[str] = None,
+                       account_type: Optional[str] = None) -> int:
+        """Insert account ``name`` or return the existing row's id.
+
+        ``account_name`` (the display name) and ``account_type`` are optional and
+        additive: a call that omits them never erases a previously stored value
+        (COALESCE), so the older call sites are unaffected. They feed the
+        business-group projection (Issue #112).
+        """
+        # Older databases predate the two columns; make sure they exist so a
+        # repository built without ``init_db`` still accepts the metadata.
+        self._ensure_account_columns()
         self.conn.execute(
-            "INSERT INTO google_accounts(name) VALUES (?) "
-            "ON CONFLICT(name) DO NOTHING",
-            (name,),
+            "INSERT INTO google_accounts(name, account_name, account_type)"
+            " VALUES (?, ?, ?) "
+            "ON CONFLICT(name) DO UPDATE SET"
+            " account_name = COALESCE(excluded.account_name,"
+            "                          google_accounts.account_name),"
+            " account_type = COALESCE(excluded.account_type,"
+            "                          google_accounts.account_type)",
+            (name, account_name, account_type),
         )
         self.conn.commit()
         row = self.conn.execute(
             "SELECT id FROM google_accounts WHERE name = ?", (name,)
         ).fetchone()
         return int(row["id"])
+
+    def account_metadata(self) -> Dict[int, Dict[str, Any]]:
+        """Return ``{account row id: {"name", "account_name", "account_type"}}``.
+
+        Tolerant of a database created before Issue #112 (the two metadata
+        columns are simply absent and reported as ``None``), so the projection
+        can never crash on an old DB file.
+        """
+        cols = {row[1] for row in self.conn.execute(
+            "PRAGMA table_info(google_accounts)")}
+        if not cols:
+            return {}
+        selected = ["id", "name"]
+        selected.append("account_name" if "account_name" in cols
+                        else "NULL AS account_name")
+        selected.append("account_type" if "account_type" in cols
+                        else "NULL AS account_type")
+        out: Dict[int, Dict[str, Any]] = {}
+        for row in self.conn.execute(
+                "SELECT " + ", ".join(selected) + " FROM google_accounts").fetchall():
+            data = dict(row)
+            out[int(data["id"])] = data
+        return out
 
     def upsert_location(
         self,

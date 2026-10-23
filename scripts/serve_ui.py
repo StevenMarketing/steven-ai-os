@@ -34,9 +34,11 @@ from gbp.authz.store import UserStore  # noqa: E402
 from gbp.security import SessionSecretError, redact  # noqa: E402
 from gbp.brand import BrandLoader  # noqa: E402
 from gbp.fixtures import (  # noqa: E402
+    list_accounts,
     list_locations,
     load_brand_profiles,
     load_fixture,
+    load_location_groups,
     review_page_files,
 )
 from gbp.reply.classify import parse_stars  # noqa: E402
@@ -57,7 +59,14 @@ from gbp.security.policy import PasswordPolicyError, validate_password  # noqa: 
 
 def _seed(repo: Repository) -> int:
     """Load fixture accounts/locations/reviews and stage a draft per review."""
-    acct = repo.upsert_account("accounts/1001")
+    # Account metadata (display name + type) so the business-group projection
+    # can tell a real group from the primary "Ungrouped" account (Issue #112).
+    primary = (list_accounts() or [{}])[0]
+    acct = repo.upsert_account(
+        primary.get("name") or "accounts/1001",
+        account_name=primary.get("accountName"),
+        account_type=primary.get("type"),
+    )
 
     location_ids: Dict[str, int] = {}
     for loc in list_locations():
@@ -71,6 +80,28 @@ def _seed(repo: Repository) -> int:
             # the UI shows an em dash -- nothing is invented.
             postal_code=loc.get("postalCode") or loc.get("postal_code"),
         )
+
+    # Extra business groups (Issue #112): each is a real LOCATION_GROUP account
+    # with its own locations, so the dashboard shows more than one group. These
+    # carry no reviews (there are no review fixtures for them), so the seeded
+    # review counts are unchanged.
+    for group in load_location_groups():
+        gname = group.get("name")
+        if not gname:
+            continue
+        g_acct = repo.upsert_account(
+            gname, account_name=group.get("accountName"),
+            account_type=group.get("type"))
+        for loc in group.get("locations", []):
+            lname = loc.get("name")
+            if not lname:
+                continue
+            location_ids[lname] = repo.upsert_location(
+                g_acct, lname,
+                title=loc.get("title"), city=loc.get("city"),
+                state=loc.get("state"), language=loc.get("language"),
+                postal_code=loc.get("postalCode") or loc.get("postal_code"),
+            )
 
     # Brand profiles: keyed by the integer location id so the Locations view and
     # the service's DB fallback both see them.

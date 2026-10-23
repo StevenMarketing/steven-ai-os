@@ -1,0 +1,35 @@
+{
+  "comment": "Issue #112 -- extra GBP business groups (accounts of type LOCATION_GROUP) used by the demo seeder so the dashboard has more than one group without any live data. The primary account in accounts.json is the implicit 'Ungrouped' bucket; every group here becomes a real, filterable group.",
+  "groups": [
+    {
+      "name": "accounts/2002",
+      "accountName": "ADZDigital Clients",
+      "type": "LOCATION_GROUP",
+      "role": "OWNER",
+      "verificationState": "VERIFIED",
+      "locations": [
+        {
+          "name": "accounts/2002/locations/loc-101",
+          "title": "ADZ Nails — Boston",
+          "city": "Boston",
+          "state": "MA",
+          "language": "en"
+        },
+        {
+          "name": "accounts/2002/locations/loc-102",
+          "title": "ADZ Nails — Seattle",
+          "city": "Seattle",
+          "state": "WA",
+          "language": "en"
+        },
+        {
+          "name": "accounts/2002/locations/loc-103",
+          "title": "ADZ Nails — Austin",
+          "city": "Austin",
+          "state": "TX",
+          "language": "vi"
+        }
+      ]
+    }
+  ]
+}
