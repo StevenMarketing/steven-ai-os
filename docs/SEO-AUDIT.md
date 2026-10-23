@@ -27,7 +27,7 @@ no competitor data and makes no ranking claim.
 | Services | `SEO-SERVICES-DUPLICATE`, `SEO-SERVICES-TOO-FEW` | |
 | Description | `SEO-DESCRIPTION-TOO-SHORT`, `-TOO-LONG`, `-PHONE`, `-URL`, `-ALL-CAPS`, `-KEYWORD-STUFFING` | flags stuffing rather than encouraging it |
 | Description <-> services coherence | `SEO-SERVICES-NOT-IN-DESCRIPTION`, `SEO-DESCRIPTION-SERVICE-NOT-LISTED` | deterministic cross-reference (`low`); quotes the matched terms and never asserts what the business offers |
-| Hours | `SEO-HOURS-DAY-MISSING`, `-MALFORMED`, `-INVALID-RANGE`, `-ALL-CLOSED` | |
+| Hours | `SEO-HOURS-DAY-MISSING`, `-MALFORMED`, `-INVALID-RANGE`, `-ALL-CLOSED` | a close of `00:00` is read as `24:00` (see *Midnight close* below) |
 | Identity (cross-location) | `SEO-IDENTITY-REUSED-NAME`, `SEO-IDENTITY-DUPLICATE-NAME-ZIP` | mirrors the dashboard convention: name + ZIP |
 | Malformed input | `SEO-PROFILE-MALFORMED` | a wrong-typed field is reported, never invented |
 
@@ -64,6 +64,36 @@ plurals ("manicures" ~ "Manicure") and matches against a small built-in
 `NAIL_SERVICE_VOCABULARY`. It reports only the cross-reference result and quotes
 the matched terms; it never asserts what the business offers and invents no
 service or category.
+
+## Midnight close (issue #98)
+
+`00:00` on the **close** side is midnight at the *end* of the day, so
+`_check_hours` reads it as `24:00` (1440 minutes) instead of `00:00` (0 minutes) —
+but only when the open time is a real time after `00:00`. Before this, a shop
+open `09:00-00:00` looked inverted (`540 >= 0`) and every such day added a
+`medium` `SEO-HOURS-INVALID-RANGE`, so a perfect profile with one midnight-closing
+day scored **93 instead of 100**.
+
+| Fixture | Result |
+|---|---|
+| `10:00-00:00` (one day) | no finding, score 100 |
+| `09:00-00:00` (all seven days) | no findings, score 100 |
+| `19:00-09:00` | `SEO-HOURS-INVALID-RANGE` (still) |
+| `09:00-09:00` (open == close) | `SEO-HOURS-INVALID-RANGE` (still) |
+| `00:00-00:00` | `SEO-HOURS-INVALID-RANGE` (still: open is not *after* midnight) |
+| `22:00-02:00` | `SEO-HOURS-INVALID-RANGE` (still) |
+| malformed close (`00:0`, `25:99`) | `SEO-HOURS-MALFORMED`, unchanged |
+
+**Out of scope (owner decision).** Only an exact `00:00` close is special-cased.
+General overnight windows (e.g. `22:00-02:00`) are deliberately **not** supported
+and keep their invalid-range finding; that is a separate product decision.
+`_minutes` itself is unchanged, so the rule lives in one place — `_check_hours`.
+
+**Known divergence.** `src/gbp/seo/gap.py` has its own `_has_full_week_hours`
+helper that still treats a `00:00` close as *not* a full week of hours, so a
+midnight-closing shop is counted as missing `full_week_hours` in the competitor
+presence table (`docs/SEO-GAP.md`). That helper is outside this fix's scope
+(`_check_hours` only) and was left untouched; aligning it is a separate change.
 
 ## Multi-location identity
 
@@ -126,11 +156,12 @@ Example (synthetic demo account, trimmed):
 cd /opt/data/gbp-integration && PYTHONPATH=src python3 -m unittest tests.test_seo_audit
 ```
 
-42 tests: completeness, categories/services, description, hours, duplicate
-name/ZIP, reused-name non-scoring behaviour, description <-> services coherence,
-empty and malformed fixtures, deterministic JSON, prioritised actions, deep-copy
-fixtures, and an explicit **no-network guard** (sockets patched to raise and a
-source scan for network imports).
+50 tests: completeness, categories/services, description, hours (including the
+issue #98 midnight-close rule), duplicate name/ZIP, reused-name non-scoring
+behaviour, description <-> services coherence, empty and malformed fixtures,
+deterministic JSON, prioritised actions, deep-copy fixtures, and an explicit
+**no-network guard** (sockets patched to raise and a source scan for network
+imports).
 
 ## Dashboard preview (issue #42)
 
