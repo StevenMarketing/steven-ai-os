@@ -200,6 +200,11 @@
                 <option value="failed">failed</option>
               </select>
             </label>
+            <label for="loc-group">Business group
+              <select id="loc-group" name="group">
+                <option value="">All groups</option>
+              </select>
+            </label>
             <label for="loc-page-size">Per page
               <select id="loc-page-size" name="page_size">
                 <option value="10">10</option>
@@ -211,6 +216,8 @@
             <button type="button" id="loc-search">Search</button>
             <button type="button" id="loc-reset">Reset</button>
           </form>
+
+          <p class="muted loc-groups-summary" id="loc-groups-summary"></p>
 
           <div class="table-scroll">
             <div id="locations-table"></div>

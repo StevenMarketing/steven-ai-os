@@ -1033,6 +1033,16 @@ button.link:hover, button.link:focus-visible { text-decoration: underline; }
 .sync-history table.grid th,
 .sync-history table.grid td { padding: var(--sp-2) var(--sp-3); white-space: nowrap; }
 
+/* Business-group sections (Issue #112): one heading per group with its
+   location count, so the counts stay visible however the list is filtered. */
+.group-heading {
+  margin: var(--sp-4) 0 var(--sp-2);
+  font-size: var(--fs-14, 0.875rem);
+  font-weight: 600;
+  color: var(--brand-ink);
+}
+.loc-groups-summary { margin: 0 0 var(--sp-2); }
+
 @media (max-width: 700px) {
   table.grid.locations-table th,
   table.grid.locations-table td { white-space: normal; }

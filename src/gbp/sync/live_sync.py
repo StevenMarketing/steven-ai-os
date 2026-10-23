@@ -27,6 +27,7 @@ import time
 from typing import Any, Callable, Dict, List, Optional
 
 from gbp.client.gbp_client import GbpClient
+from gbp.groups import group_fields
 from gbp.oauth.tenancy import normalize_tenant
 from gbp.oauth.vault import TokenVault, TokenExpiredError
 from gbp.sync.pacing import DEFAULT_QPM, TokenBucket
@@ -56,27 +57,40 @@ class AuthorizedHttp:
 
 
 def map_account(account: Dict[str, Any], *, tenant: str) -> Dict[str, Any]:
-    """Normalise one GBP account into the dashboard shape."""
+    """Normalise one GBP account into the dashboard shape.
+
+    The account is the *group* for every location under it: a ``LOCATION_GROUP``
+    account is a real business group, anything else (a primary/personal
+    account) is reported as ``Ungrouped`` (see :mod:`gbp.groups`).
+    """
     name = str((account or {}).get("name") or "")
-    return {
+    account_name = str((account or {}).get("accountName")
+                       or (account or {}).get("name") or "")
+    account_type = (account or {}).get("type")
+    row = {
         "tenant_id": tenant,
         "account_id": name,
-        "account_name": str((account or {}).get("accountName")
-                            or (account or {}).get("name") or ""),
-        "type": (account or {}).get("type"),
+        "account_name": account_name,
+        "type": account_type,
     }
+    row.update(group_fields(name, account_name, account_type))
+    return row
 
 
 def map_location(location: Dict[str, Any], *, tenant: str, account: str,
-                 sync_status: str = "ok", last_sync: Optional[str] = None) -> Dict[str, Any]:
+                 sync_status: str = "ok", last_sync: Optional[str] = None,
+                 account_name: Optional[str] = None,
+                 account_type: Optional[str] = None) -> Dict[str, Any]:
     """Normalise one GBP location into the dashboard rows model.
 
     Fields are the ones the existing dashboard already renders: business name
-    (title), ZIP (postal code), sync status, last sync.
+    (title), ZIP (postal code), sync status, last sync. Every row ALSO carries
+    its business-group projection (``group_id`` / ``group_name`` /
+    ``group_type``) so the UI can filter and section locations by group.
     """
     address = (location or {}).get("storefrontAddress") or {}
     title = (location or {}).get("title") or (location or {}).get("locationName") or ""
-    return {
+    row = {
         "tenant_id": tenant,
         "location_id": str((location or {}).get("name") or ""),
         "account_id": account,
@@ -87,6 +101,8 @@ def map_location(location: Dict[str, Any], *, tenant: str, account: str,
         "sync_status": str(sync_status),
         "last_sync": last_sync,
     }
+    row.update(group_fields(account, account_name, account_type))
+    return row
 
 
 class LiveLocationSync:
@@ -123,10 +139,25 @@ class LiveLocationSync:
         return [map_account(a, tenant=self.tenant) for a in (rows or [])]
 
     def list_locations(self, account: Any) -> List[Dict[str, Any]]:
-        """Every location under ``account`` (read-only, paginated)."""
-        name = account.get("account_id") if isinstance(account, dict) else account
+        """Every location under ``account`` (read-only, paginated).
+
+        ``account`` is normally a row from :meth:`list_accounts`, which carries
+        the account's display name and type -- so each location row is tagged
+        with the correct business-group projection. A bare resource name is
+        also accepted (the group is then reported as ``Ungrouped``, since no
+        type is known).
+        """
+        if isinstance(account, dict):
+            name = account.get("account_id") or account.get("name")
+            account_name = account.get("account_name") or account.get("accountName")
+            account_type = account.get("type") or account.get("accountType")
+        else:
+            name = account
+            account_name = None
+            account_type = None
         now_iso = _iso(self._clock())
         return [map_location(loc, tenant=self.tenant, account=str(name),
+                             account_name=account_name, account_type=account_type,
                              last_sync=now_iso)
                 for loc in (self.client.list_locations(name) or [])]
 

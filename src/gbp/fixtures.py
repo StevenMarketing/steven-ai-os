@@ -52,6 +52,22 @@ def list_reviews_pages(fixtures_dir: Optional[PathLike] = None) -> List[Dict[str
     ]
 
 
+def load_location_groups(fixtures_dir: Optional[PathLike] = None) -> List[Dict[str, Any]]:
+    """Return the extra business groups from ``location_groups.json``.
+
+    Issue #112: the primary account (``accounts.json``) is the implicit
+    "Ungrouped" bucket; this fixture adds one or more real ``LOCATION_GROUP``
+    accounts (with their locations) so grouping is visible without live data.
+    Returns an empty list when the fixture is absent, so the seeder stays
+    tolerant of older checkouts.
+    """
+    try:
+        data = load_fixture("location_groups.json", fixtures_dir)
+    except FileNotFoundError:
+        return []
+    return list((data or {}).get("groups", []))
+
+
 #: Review-page fixture files per location. The default two-page set is keyed by
 #: ``loc-001``; the other locations each have a single-page fixture. Used by
 #: :meth:`gbp.client.MockGBPClient.list_reviews_for` and the coverage tests.

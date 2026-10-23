@@ -59,6 +59,36 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, unquote, urlparse
 
+from gbp.groups import group_fields, group_summary
+
+
+def _account_group_map(repo: Any) -> Dict[int, Dict[str, Any]]:
+    """``{account row id: group fields}`` for every known account (Issue #112).
+
+    A business group IS an account, so each location's group is derived from the
+    account it belongs to. Read-only; a repo without the metadata columns is
+    reported as ``Ungrouped`` rather than guessing.
+    """
+    out: Dict[int, Dict[str, Any]] = {}
+    for acct_id, meta in repo.account_metadata().items():
+        out[acct_id] = group_fields(meta.get("name"), meta.get("account_name"),
+                                    meta.get("account_type"))
+    return out
+
+
+def _group_for(account_map: Dict[int, Dict[str, Any]],
+               account_id: Any) -> Dict[str, Any]:
+    """Group fields for one location's ``account_id`` (fallback: Ungrouped)."""
+    try:
+        key = int(account_id)
+    except (TypeError, ValueError):
+        key = None
+    if key is not None and key in account_map:
+        return account_map[key]
+    # An unknown account is reported as Ungrouped -- never invented as a group.
+    return group_fields(account_id, None, None)
+
+
 def _trusted_proxies() -> List[Any]:
     """Networks/addresses whose ``X-Forwarded-For`` we are willing to believe.
 
@@ -306,6 +336,7 @@ def _locations_status(repo: Any) -> List[Dict[str, Any]]:
     }
     locations = conn.execute(
         "SELECT * FROM business_locations ORDER BY id").fetchall()
+    account_map = _account_group_map(repo)
 
     # --- bulk aggregates (Group 8B / T27) ------------------------------ #
     # This used to run ~5 queries PER LOCATION (500 locations -> ~2500 queries
@@ -366,7 +397,7 @@ def _locations_status(repo: Any) -> List[Dict[str, Any]]:
         unanswered = unanswered_by.get(lid, 0)
         pending = pending_by.get(lid, 0)
         approved = approved_by.get(lid, 0)
-        out.append({
+        row = {
             "location_id": lid,
             "location_name": loc["location_name"],
             "business_name": business_names.get(lid) or loc["title"] or loc["location_name"],
@@ -382,7 +413,11 @@ def _locations_status(repo: Any) -> List[Dict[str, Any]]:
             "unanswered_reviews": int(unanswered),
             "drafts_pending_review": int(pending),
             "drafts_approved": int(approved),
-        })
+        }
+        # Business-group projection (Issue #112): the same three fields every
+        # other location row carries, so connection state can be read per group.
+        row.update(_group_for(account_map, loc["account_id"]))
+        out.append(row)
     return out
 
 
@@ -425,7 +460,8 @@ def _usage_stats(repo: Any) -> Dict[str, Any]:
 #: Query params that switch ``GET /api/locations`` from its legacy list shape
 #: to the paginated envelope. A bare call (no params) keeps returning the
 #: historical list so older clients -- and the legacy tests -- are unaffected.
-_LOC_PAGE_PARAMS = ("page", "page_size", "q", "state", "sync_status", "sort", "order")
+_LOC_PAGE_PARAMS = ("page", "page_size", "q", "state", "sync_status", "sort",
+                    "order", "group")
 
 
 def _google_connected() -> bool:
@@ -641,6 +677,7 @@ def _location_rows(repo: Any, service: Any) -> List[Dict[str, Any]]:
             " FROM brand_profiles").fetchall()
     }
     status = {s["location_id"]: s for s in _locations_status(repo)}
+    account_map = _account_group_map(repo)
 
     out: List[Dict[str, Any]] = []
     for loc in service.list_locations():
@@ -665,6 +702,9 @@ def _location_rows(repo: Any, service: Any) -> List[Dict[str, Any]]:
                                              or loc.get("brand_complete")),
             "auto_publish_policy": "auto" if auto else "manual",
         })
+        # Business-group projection (Issue #112): group_id (= the account id),
+        # group_name (Ungrouped for a primary/personal account) and group_type.
+        item.update(_group_for(account_map, loc.get("account_id")))
         out.append(item)
     return out
 
@@ -704,6 +744,14 @@ def _locations_page(rows: List[Dict[str, Any]], query: Dict[str, Any]) -> Dict[s
     if sync_status:
         rows = [r for r in rows if str(r.get("sync_status") or "") == sync_status]
 
+    # Per-group counts are computed AFTER the search/state/sync filters but
+    # BEFORE the group filter, so the group counts stay visible (and correct)
+    # whichever group is selected -- filtering never hides the other groups.
+    groups = group_summary(rows)
+    group = _first(query, "group")
+    if group:
+        rows = [r for r in rows if str(r.get("group_id") or "") == group]
+
     sort = (_first(query, "sort") or "business_name").lower()
     order = (_first(query, "order") or "asc").lower()
     if sort in ("business_name", "city", "state", "postal_code"):
@@ -732,6 +780,7 @@ def _locations_page(rows: List[Dict[str, Any]], query: Dict[str, Any]) -> Dict[s
         "pages": pages,
         "sort": sort,
         "order": order,
+        "groups": groups,
     }
 
 
@@ -1344,6 +1393,14 @@ def make_handler(
                 payload["google_connected"] = _google_connected()
                 # mock_mode: the server runs with auth=None -> demo/mock data.
                 payload["mock_mode"] = not bool(use_auth)
+                # Business-group summary (Issue #112): per-group location counts
+                # over the caller's visible locations, so the dashboard can show
+                # grouping even before the Locations table is opened. Read-only.
+                group_rows = _locations_status(service.repo)
+                if visible is not None:
+                    group_rows = [r for r in group_rows
+                                  if str(r.get("location_id")) in visible]
+                payload["location_groups"] = group_summary(group_rows)
                 # api_health is "ok" precisely because this response IS the
                 # dashboard having answered; the UI treats a failed fetch as
                 # "error".

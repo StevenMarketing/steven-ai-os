@@ -353,6 +353,7 @@ class ApprovalService:
             out.append(
                 {
                     "id": row["id"],
+                    "account_id": row["account_id"],
                     "location_name": row["location_name"],
                     "title": row["title"],
                     "city": row["city"],

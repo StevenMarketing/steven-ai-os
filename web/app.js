@@ -215,6 +215,11 @@
         perPage: "Per page",
         pageInfo: "Page {page} of {pages} — {total} locations",
         empty: "No locations match these filters.",
+        group: "Business group",
+        allGroups: "All groups",
+        ungrouped: "Ungrouped",
+        groupsSummary: "Locations per group",
+        groupEmpty: "No locations in this group on this page.",
         configured: "configured",
         notConfigured: "not configured",
         detailTitle: "Location detail",
@@ -1137,7 +1142,8 @@
   // --- Locations ---------------------------------------------------- //
   var locState = {
     page: 1, pages: 1, total: 0, page_size: 25,
-    sort: "business_name", order: "asc", q: "", state: "", sync_status: ""
+    sort: "business_name", order: "asc", q: "", state: "", sync_status: "",
+    group: ""
   };
   var locReviews = { location_id: null, page: 1, pages: 1, total: 0 };
 
@@ -1150,7 +1156,45 @@
     if (locState.q) q.set("q", locState.q);
     if (locState.state) q.set("state", locState.state);
     if (locState.sync_status) q.set("sync_status", locState.sync_status);
+    if (locState.group) q.set("group", locState.group);
     return q;
+  }
+
+  // Business-group filter (Issue #112). The <select> is rebuilt from the
+  // payload on every load so it only ever lists groups that really exist, and
+  // each option carries its location count -- the counts stay visible whatever
+  // group is selected. "All groups" keeps the legacy unfiltered view.
+  function groupLabel(g) {
+    return (g.group_name || t("locations.ungrouped")) + " (" + g.count + ")";
+  }
+
+  function populateGroupFilter(groups) {
+    var sel = $("loc-group");
+    if (!sel) return;
+    var current = locState.group || "";
+    clearNode(sel);
+    sel.appendChild(el("option", { text: t("locations.allGroups"),
+      attrs: { value: "" } }));
+    (groups || []).forEach(function (g) {
+      var gid = g.group_id || "";
+      sel.appendChild(el("option", { text: groupLabel(g),
+        attrs: { value: gid } }));
+    });
+    // Keep the previous selection only when that group still exists.
+    var stillThere = (groups || []).some(function (g) {
+      return (g.group_id || "") === current;
+    });
+    if (!stillThere) locState.group = "";
+    sel.value = locState.group || "";
+  }
+
+  function renderGroupsSummary(groups) {
+    var el2 = $("loc-groups-summary");
+    if (!el2) return;
+    var parts = (groups || []).map(function (g) { return groupLabel(g); });
+    el2.textContent = parts.length
+      ? t("locations.groupsSummary") + ": " + parts.join(" · ")
+      : "";
   }
 
   function renderLocations() {
@@ -1160,12 +1204,42 @@
     api("GET", "/api/locations?" + locQuery().toString()).then(function (res) {
       clearNode(wrap);
       var rows = (res && res.items) || [];
+      var groups = (res && res.groups) || [];
       locState.page = (res && res.page) || locState.page;
       locState.pages = (res && res.pages) || 0;
       locState.total = (res && res.total) || 0;
+      populateGroupFilter(groups);
+      renderGroupsSummary(groups);
       updateLocPager();
       if (!rows.length) { renderEmpty(wrap, t("locations.empty")); return; }
-      wrap.appendChild(locationsTable(rows));
+      // Sections by group: one heading (with the group's total count) plus the
+      // table of that group's rows on this page.
+      var order = groups.length ? groups : [{ group_id: "", group_name: "" }];
+      var rendered = 0;
+      order.forEach(function (g) {
+        var gRows = rows.filter(function (r) {
+          return String(r.group_id || "") === String(g.group_id || "");
+        });
+        if (!gRows.length) return;
+        wrap.appendChild(el("h3", { cls: "group-heading",
+          text: groupLabel({ group_name: g.group_name || t("locations.ungrouped"),
+                             count: g.count == null ? gRows.length : g.count }) }));
+        wrap.appendChild(locationsTable(gRows));
+        rendered += gRows.length;
+      });
+      // Safety net: never hide a row that no group entry matched.
+      if (rendered < rows.length) {
+        var leftovers = rows.filter(function (r) {
+          return !order.some(function (g) {
+            return String(r.group_id || "") === String(g.group_id || "");
+          });
+        });
+        if (leftovers.length) {
+          wrap.appendChild(el("h3", { cls: "group-heading",
+            text: t("locations.ungrouped") + " (" + leftovers.length + ")" }));
+          wrap.appendChild(locationsTable(leftovers));
+        }
+      }
     }).catch(function (err) {
       renderErrorState(wrap, err);
       reportError(err);
@@ -2691,6 +2765,15 @@
         locState.q = ($("loc-q").value || "").trim();
         locState.state = $("loc-state").value || "";
         locState.sync_status = $("loc-sync").value || "";
+        if ($("loc-group")) locState.group = $("loc-group").value || "";
+        locState.page = 1;
+        renderLocations();
+      });
+    }
+    // The group filter composes with search/state/sync and applies immediately.
+    if ($("loc-group")) {
+      $("loc-group").addEventListener("change", function () {
+        locState.group = $("loc-group").value || "";
         locState.page = 1;
         renderLocations();
       });
@@ -2698,10 +2781,12 @@
     if ($("loc-reset")) {
       $("loc-reset").addEventListener("click", function () {
         locState.q = ""; locState.state = ""; locState.sync_status = "";
+        locState.group = "";
         locState.sort = "business_name"; locState.order = "asc"; locState.page = 1;
         if ($("loc-q")) $("loc-q").value = "";
         if ($("loc-state")) $("loc-state").value = "";
         if ($("loc-sync")) $("loc-sync").value = "";
+        if ($("loc-group")) $("loc-group").value = "";
         renderLocations();
       });
     }
