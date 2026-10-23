@@ -33,10 +33,11 @@ _WEEKDAYS = ("monday", "tuesday", "wednesday", "thursday", "friday",
              "saturday", "sunday")
 
 _DESCRIPTION = (
-    "Synthetic fixture shop used only for offline tests: manicures, pedicures, "
-    "gel nails and careful nail health, with enough prose for the length "
-    "checks to have something realistic to measure without any real customer "
-    "or business data appearing anywhere in this file or in a gap report."
+    "Synthetic fixture shop in Garden Grove used only for offline tests: "
+    "manicures, pedicures, gel nails and careful nail health, with enough prose "
+    "for the length checks to have something realistic to measure without any "
+    "real customer or business data appearing anywhere in this file or in a gap "
+    "report."
 )
 
 
@@ -59,6 +60,11 @@ def _profile(**overrides):
         "website": "https://example.invalid/fixture",
         # A complete shop carries photos (issue #107); tests override as needed.
         "photos": {"total": 24, "exterior": 8, "interior": 8, "work": 8},
+        # Tier 2 (issue #108): a complete shop also sets attributes, a booking
+        # link and (valid) special hours, so the new checks stay silent.
+        "attributes": ["Walk-ins welcome", "Women-owned"],
+        "booking_url": "https://example.invalid/fixture/book",
+        "special_hours": {"2026-12-25": {"open": "10:00", "close": "16:00"}},
     }
     base.update(overrides)
     return base

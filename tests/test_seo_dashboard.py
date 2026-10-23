@@ -81,12 +81,13 @@ def _complete_profile(index: int, zipcode: str) -> dict:
         "primary_category": "Nail Salon",
         "secondary_categories": ["Manicure", "Pedicure"],
         "services": ["Manicure", "Pedicure", "Gel Nails"],
-        "description": ("Chain Nails is a synthetic shop used only by offline "
-                        "tests. It lists manicures, pedicures and gel nails in a short "
-                        "paragraph so the length checks have realistic text "
-                        "without any real business or customer data, and it is "
-                        "long enough to satisfy the recommended minimum "
-                        "description length that the audit engine measures."),
+        "description": ("Chain Nails is a synthetic shop in Garden Grove used "
+                        "only by offline tests. It lists manicures, pedicures "
+                        "and gel nails in a short paragraph so the length checks "
+                        "have realistic text without any real business or "
+                        "customer data, and it is long enough to satisfy the "
+                        "recommended minimum description length that the audit "
+                        "engine measures."),
         "hours": {day: {"open": "09:00", "close": "19:00"}
                   for day in ("monday", "tuesday", "wednesday", "thursday",
                               "friday", "saturday", "sunday")},
@@ -94,6 +95,11 @@ def _complete_profile(index: int, zipcode: str) -> dict:
         "website": "https://example.invalid/chain",
         # A complete shop carries photos (issue #107).
         "photos": {"total": 24, "exterior": 8, "interior": 8, "work": 8},
+        # Tier 2 (issue #108): a complete shop also sets attributes, a booking
+        # link and (valid) special hours, so the new checks stay silent.
+        "attributes": ["Walk-ins welcome", "Women-owned"],
+        "booking_url": "https://example.invalid/chain/book",
+        "special_hours": {"2026-12-25": {"open": "10:00", "close": "16:00"}},
     }
 
 
