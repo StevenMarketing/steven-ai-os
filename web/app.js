@@ -46,7 +46,8 @@
         systemStatus: "System Status",
         settings: "Settings",
         googleConnection: "Google Connection",
-        businessDashboard: "Business Dashboard"
+        businessDashboard: "Business Dashboard",
+        seoAudit: "SEO Audit"
       },
       state: {
         loading: "Loading…",
@@ -110,6 +111,36 @@
         colComment: "Comment",
         colAuthor: "Reviewer",
         view: "View"
+      },
+      seo: {
+        // READ-ONLY offline audit preview (issue #42). Findings come from the
+        // #39 audit engine; nothing here implies a live Google connection or a
+        // ranking outcome. The score is a heuristic COMPLETENESS score.
+        fixtureBadge: "DEMO",
+        banner: "DEMO / OFFLINE PREVIEW — no live Google connectivity. " +
+          "Synthetic fixture data only; nothing is read from or written to Google.",
+        note: "Read-only preview powered by the offline audit engine. No Google " +
+          "API call, no competitor ranking data, no automatic profile change.",
+        scoreLabel: "completeness score (heuristic)",
+        scoreCaption: "Score: {label} (0-100) — it measures how complete the " +
+          "profile fields are. It is NOT a Google ranking score. {n} salon(s) audited.",
+        scoreCaptionNone: "No salons in this fixture dataset.",
+        empty: "No fixture salons in this dataset.",
+        colName: "Business Name",
+        colZip: "ZIP Code",
+        colId: "Location Resource ID",
+        colScore: "Completeness",
+        view: "View audit",
+        detailTitle: "Salon audit",
+        selectSalon: "Select a business above to see its audit findings.",
+        missingFields: "Missing required fields",
+        noMissingFields: "No required profile field is missing.",
+        categoriesTitle: "Categories (kept separate from services)",
+        servicesTitle: "Services",
+        otherTitle: "Other findings",
+        noGroupFindings: "No finding in this group.",
+        noOtherFindings: "No other finding.",
+        noSalons: "No salons"
       },
       dashboard: {
         summary: "Total drafts tracked: {n}. DRAFT MODE — nothing is published to Google.",
@@ -295,7 +326,8 @@
     status:      { section: "status" },     // System Status shell panel
     settings:    { section: "settings" },   // Settings shell panel
     google:      { section: "google" },     // Google Connection (offline fixture preview)
-    business:    { section: "business" }    // Business Dashboard (offline fixture preview)
+    business:    { section: "business" },   // Business Dashboard (offline fixture preview)
+    seo:         { section: "seo" }         // SEO Audit (offline audit preview, issue #42)
   };
 
   // NAV -> AREA MAPPING. The old `?area=` values keep working and the new nav
@@ -323,7 +355,9 @@
     "google-connection": "google",
     connection: "google",
     "business-dashboard": "business",
-    businesses: "business"
+    businesses: "business",
+    "seo-audit": "seo",
+    seoaudit: "seo"
   };
 
   //: Primary nav order (the 8 areas), used to keep active-state in sync.
@@ -631,6 +665,7 @@
     $("area-settings").hidden = cfg.section !== "settings";
     $("area-google").hidden = cfg.section !== "google";
     $("area-business").hidden = cfg.section !== "business";
+    $("area-seo").hidden = cfg.section !== "seo";
 
     if (cfg.section === "dashboard") renderDashboard();
     else if (cfg.section === "locations") renderLocations();
@@ -639,6 +674,7 @@
     else if (cfg.section === "settings") renderSettings();
     else if (cfg.section === "google") renderGoogleConnection();
     else if (cfg.section === "business") renderBusinessDashboard();
+    else if (cfg.section === "seo") renderSeoAudit();
     else renderQueue(cfg);
 
     closeDrawer();
@@ -1887,6 +1923,268 @@
     });
   }
 
+  // --- SEO Audit (READ-ONLY offline audit preview, issue #42) -------- //
+  // The findings are produced by the issue #39 audit engine and served by
+  // GET /api/seo/audit -- no audit logic is re-implemented here. Every value is
+  // SYNTHETIC fixture data: there is no live Google connectivity, no competitor
+  // ranking data, no ranking claim and no automatic profile change. The score is
+  // a heuristic COMPLETENESS score and is labelled exactly as such.
+  //
+  // SAFE RENDERING: every dynamic value goes through el(..., {text: ...}) which
+  // sets textContent; this module never assigns a raw HTML string, so fixture
+  // markup (see the "hostile" dataset) stays literal text and cannot execute.
+  var seoState = { dataset: "default", selected: null, salons: [] };
+
+  var SEO_SEVERITY_LABEL = { high: "High", medium: "Medium", low: "Low" };
+
+  function seoSalonLabel(salon) {
+    // name · ZIP · resource id — the shared dashboard disambiguation key: two
+    // shops may share a name, so the ZIP and the resource id tell them apart.
+    if (salon.identity_label) return salon.identity_label;
+    return (salon.display_name || "(untitled fixture)") + " \u00b7 " +
+      (salon.postal_code || "(no ZIP)") + " \u00b7 " +
+      (salon.location_name || "(no resource id)");
+  }
+
+  function seoScoreText(salon) {
+    return String(salon.score != null ? salon.score : "-") + " / 100";
+  }
+
+  function seoSeverityBadge(finding) {
+    var sev = String(finding.severity || "").toLowerCase();
+    return el("span", { cls: "sev sev-" + sev,
+      text: SEO_SEVERITY_LABEL[sev] || sev || "-" });
+  }
+
+  function seoFindingNode(finding) {
+    var item = el("li", { cls: "finding finding-" + String(finding.severity || "") });
+    item.appendChild(el("div", { cls: "finding-head" }, [
+      seoSeverityBadge(finding),
+      el("span", { cls: "finding-code", text: finding.code || "" }),
+      el("span", { cls: "finding-field", text: finding.field || "" })
+    ]));
+    item.appendChild(el("p", { cls: "finding-message", text: finding.message || "" }));
+    if (finding.evidence) {
+      item.appendChild(el("p", { cls: "finding-evidence",
+        text: "Evidence: " + finding.evidence }));
+    }
+    if (finding.recommendation) {
+      item.appendChild(el("p", { cls: "finding-action",
+        text: "Suggested action: " + finding.recommendation }));
+    }
+    return item;
+  }
+
+  function seoFindingList(findings, emptyMessage) {
+    var wrap = el("div");
+    if (!findings || !findings.length) {
+      wrap.appendChild(el("p", { cls: "muted", text: emptyMessage }));
+      return wrap;
+    }
+    var list = el("ul", { cls: "finding-list" });
+    findings.forEach(function (f) { list.appendChild(seoFindingNode(f)); });
+    wrap.appendChild(list);
+    return wrap;
+  }
+
+  function renderSeoSalons(salons) {
+    var wrap = $("seo-salons");
+    if (!wrap) return;
+    clearNode(wrap);
+    if (!salons.length) { renderEmpty(wrap, t("seo.empty")); return; }
+    var table = el("table", { cls: "grid seo-table" });
+    table.appendChild(el("thead", {}, [el("tr", {}, [
+      el("th", { text: t("seo.colName") }),
+      el("th", { text: t("seo.colZip") }),
+      el("th", { text: t("seo.colId") }),
+      el("th", { text: t("seo.colScore") }),
+      el("th", { text: "" })
+    ])]));
+    var body = el("tbody");
+    salons.forEach(function (salon) {
+      var selected = seoState.selected === salon.location_name;
+      var tr = el("tr", {
+        cls: "seo-row" + (selected ? " selected" : ""),
+        attrs: { "data-seo-id": salon.location_name || "" }
+      });
+      tr.appendChild(el("td", { attrs: { "data-label": t("seo.colName") } }, [
+        el("button", {
+          cls: "link-btn",
+          text: salon.display_name || "(untitled fixture)",
+          attrs: { type: "button", "data-seo-select": salon.location_name || "" }
+        })
+      ]));
+      tr.appendChild(el("td", { text: salon.postal_code || "\u2014",
+        attrs: { "data-label": t("seo.colZip") } }));
+      tr.appendChild(el("td", { text: salon.location_name || "\u2014",
+        attrs: { "data-label": t("seo.colId") } }));
+      tr.appendChild(el("td", { attrs: { "data-label": t("seo.colScore") } }, [
+        el("span", { cls: "seo-score", text: seoScoreText(salon) })
+      ]));
+      var view = el("button", { cls: "link-btn", text: t("seo.view"),
+        attrs: { type: "button" } });
+      view.addEventListener("click", function () {
+        selectSeoSalon(salon.location_name);
+      });
+      tr.appendChild(el("td", {}, [view]));
+      body.appendChild(tr);
+    });
+    table.appendChild(body);
+    wrap.appendChild(table);
+  }
+
+  function findSeoSalon(locationName) {
+    var found = null;
+    seoState.salons.forEach(function (s) {
+      if (s.location_name === locationName) found = s;
+    });
+    return found;
+  }
+
+  function selectSeoSalon(locationName) {
+    seoState.selected = locationName;
+    renderSeoSalons(seoState.salons);
+    populateSeoSalonPicker(seoState.salons);
+    renderSeoDetail(findSeoSalon(locationName));
+  }
+
+  function populateSeoSalonPicker(salons) {
+    var sel = $("seo-salon");
+    if (!sel) return;
+    clearNode(sel);
+    if (!salons.length) {
+      sel.appendChild(el("option", { text: t("seo.noSalons"), attrs: { value: "" } }));
+      sel.disabled = true;
+      return;
+    }
+    sel.disabled = false;
+    salons.forEach(function (salon) {
+      sel.appendChild(el("option", { text: seoSalonLabel(salon),
+        attrs: { value: salon.location_name || "" } }));
+    });
+    sel.value = seoState.selected || "";
+  }
+
+  function renderSeoDetail(salon) {
+    var body = $("seo-detail-body");
+    var title = $("seo-detail-title");
+    if (!body) return;
+    clearNode(body);
+    if (title) {
+      title.textContent = t("seo.detailTitle") +
+        (salon ? " — " + seoSalonLabel(salon) : "");
+    }
+    if (!salon) { renderEmpty(body, t("seo.selectSalon")); return; }
+
+    // Completeness score, labelled as the heuristic it is.
+    body.appendChild(el("div", { cls: "seo-head" }, [
+      el("div", { cls: "seo-score-big", text: seoScoreText(salon) }),
+      el("div", { cls: "seo-score-label",
+        text: salon.score_label || t("seo.scoreLabel") })
+    ]));
+
+    // Missing required fields.
+    body.appendChild(el("h4", { cls: "seo-sub", text: t("seo.missingFields") }));
+    var missing = salon.missing_fields || [];
+    if (missing.length) {
+      var chips = el("div", { cls: "missing-chips" });
+      missing.forEach(function (name) {
+        chips.appendChild(el("span", { cls: "chip chip-missing", text: name }));
+      });
+      body.appendChild(chips);
+    } else {
+      body.appendChild(el("p", { cls: "muted", text: t("seo.noMissingFields") }));
+    }
+
+    // Categories and services kept clearly apart.
+    body.appendChild(el("h4", { cls: "seo-sub", text: t("seo.categoriesTitle") }));
+    body.appendChild(seoFindingList(salon.category_findings, t("seo.noGroupFindings")));
+    body.appendChild(el("h4", { cls: "seo-sub", text: t("seo.servicesTitle") }));
+    body.appendChild(seoFindingList(salon.service_findings, t("seo.noGroupFindings")));
+
+    // Everything else, still in the engine's priority order.
+    body.appendChild(el("h4", { cls: "seo-sub", text: t("seo.otherTitle") }));
+    body.appendChild(seoFindingList(salon.other_findings, t("seo.noOtherFindings")));
+  }
+
+  function renderSeoAudit() {
+    clearNotice();
+    var badge = $("seo-fixture-badge");
+    if (badge) badge.textContent = t("seo.fixtureBadge");
+    var banner = $("seo-banner");
+    if (banner) banner.textContent = t("seo.banner");
+    var note = $("seo-note");
+    if (note) note.textContent = t("seo.note");
+    var picker = $("seo-dataset");
+    if (picker) picker.value = seoState.dataset;
+
+    var caption = $("seo-score-caption");
+    var wrap = $("seo-salons");
+    renderLoading(wrap);
+    renderLoading($("seo-detail-body"));
+
+    api("GET", "/api/seo/audit?dataset=" + encodeURIComponent(seoState.dataset))
+      .then(function (data) {
+        data = data || {};
+        seoState.salons = data.salons || [];
+        // Keep the current selection when it still exists, else pick the first.
+        var keep = null;
+        seoState.salons.forEach(function (s) {
+          if (s.location_name === seoState.selected) keep = s.location_name;
+        });
+        seoState.selected = keep ||
+          (seoState.salons.length ? seoState.salons[0].location_name : null);
+        if (caption) {
+          caption.textContent = seoState.salons.length
+            ? t("seo.scoreCaption", {
+                label: data.score_label || t("seo.scoreLabel"),
+                n: data.location_count != null ? data.location_count : seoState.salons.length
+              })
+            : t("seo.scoreCaptionNone");
+        }
+        renderSeoSalons(seoState.salons);
+        populateSeoSalonPicker(seoState.salons);
+        renderSeoDetail(findSeoSalon(seoState.selected));
+      })
+      .catch(function (err) {
+        // Error state: a failed audit fetch is shown as an error, never as an
+        // empty (or worse, healthy) report.
+        seoState.salons = [];
+        seoState.selected = null;
+        if (caption) caption.textContent = t("seo.scoreCaptionNone");
+        renderErrorState($("seo-salons"), err);
+        renderErrorState($("seo-detail-body"), err);
+        populateSeoSalonPicker([]);
+        reportError(err);
+      });
+  }
+
+  function bindSeoControls() {
+    var picker = $("seo-dataset");
+    if (picker) {
+      picker.addEventListener("change", function () {
+        seoState.dataset = picker.value || "default";
+        seoState.selected = null;
+        renderSeoAudit();
+      });
+    }
+    var salon = $("seo-salon");
+    if (salon) {
+      salon.addEventListener("change", function () {
+        selectSeoSalon(salon.value);
+      });
+    }
+    var reset = $("seo-reset");
+    if (reset) {
+      reset.addEventListener("click", function () {
+        seoState.dataset = "default";
+        seoState.selected = null;
+        if (picker) picker.value = "default";
+        renderSeoAudit();
+      });
+    }
+  }
+
   // ------------------------------------------------------------------ //
   // queue
   // ------------------------------------------------------------------ //
@@ -2387,6 +2685,7 @@
     }
 
     // Locations page controls (server-side search / filter / sort / paging).
+    bindSeoControls();
     if ($("loc-search")) {
       $("loc-search").addEventListener("click", function () {
         locState.q = ($("loc-q").value || "").trim();

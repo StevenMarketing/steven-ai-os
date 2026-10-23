@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import datetime as _dt
 import json
+import math
 import os
 import sys
 from typing import Any, Dict, List, Optional
@@ -48,8 +49,11 @@ def _read_json(path: Optional[str]) -> tuple:
         return None, "state-missing"
     try:
         with open(path, "r", encoding="utf-8") as handle:
-            return json.load(handle), None
-    except (OSError, ValueError):
+            data = json.load(handle)
+            if not isinstance(data, dict):
+                return None, "state-unreadable"
+            return data, None
+    except (OSError, ValueError, OverflowError):
         return None, "state-unreadable"
 
 
@@ -67,12 +71,15 @@ def _last_audit_ts(path: Optional[str]) -> Optional[float]:
         if not last:
             return None
         row = json.loads(last)
+        if not isinstance(row, dict):
+            return None
         for key in ("ts", "time", "at", "epoch", "timestamp"):
             value = row.get(key)
-            if isinstance(value, (int, float)):
+            if (not isinstance(value, bool) and isinstance(value, (int, float))
+                    and math.isfinite(value)):
                 return float(value)
         return None
-    except (OSError, ValueError):
+    except (OSError, ValueError, OverflowError):
         return None
 
 
@@ -145,8 +152,6 @@ def build(args: argparse.Namespace) -> Dict[str, Any]:
         if running_since is None and claims:
             blocker = "scheduling: live claim expired (stale claim)"
             category = hb.classify_problem(blocker)
-        else:
-            last_poll = now if (last_poll is None and args.state) else last_poll
         state_name = hb.heartbeat_state(
             now=now, last_poll=last_poll, running_since=running_since,
             stall_seconds=args.stall_seconds, blocked=category is not None

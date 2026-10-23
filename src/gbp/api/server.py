@@ -784,6 +784,16 @@ def _reviews_page(rows: List[Dict[str, Any]], query: Dict[str, Any]) -> Dict[str
         rows = [r for r in rows if term in " ".join(
             str(r.get(k) or "") for k in
             ("comment", "business_name", "reviewer_name", "postal_code")).lower()]
+    # Increment 1 (Issue #71): the unanswered view the salon switcher needs. A review counts as
+    # answered only when its newest reply is approved or sent; a reply still in draft - or edited
+    # back to draft - means the salon still owes an answer. Reuses the row fields the join already
+    # provides, so no extra query is introduced.
+    _raw_unanswered = (query or {}).get("unanswered")
+    if isinstance(_raw_unanswered, (list, tuple)):
+        _raw_unanswered = _raw_unanswered[0] if _raw_unanswered else ""
+    unanswered = str(_raw_unanswered or "").strip().lower() in ("1", "true", "yes", "on")
+    if unanswered:
+        rows = [r for r in rows if str(r.get("status")) not in ("approved", "sent")]
 
     sort = (_first(query, "sort") or "review_date").lower()
     order = (_first(query, "order") or "desc").lower()
@@ -1509,6 +1519,25 @@ def make_handler(
                         rows = [r for r in rows
                                 if str(_audit_row_location(service.repo, r)) in visible]
                 return 200, rows
+            if path == "/api/seo/audit":
+                # READ-ONLY, offline SEO audit preview (issue #42). The report is
+                # produced by the issue #39 audit engine on synthetic fixtures --
+                # no audit logic lives here, no Google call is made, no profile
+                # is edited. ``dataset`` selects a deterministic fixture set
+                # (default/incomplete/hostile/empty/error) so the dashboard can
+                # show its empty and error states on purpose.
+                from gbp.seo.preview import DemoError, PreviewError, build_preview
+
+                dataset = (_first(query, "dataset") or "default").strip()
+                try:
+                    return 200, build_preview(dataset=dataset)
+                except PreviewError as exc:
+                    return _err(400, "invalid_request",
+                                detail=f"invalid dataset: {exc}")
+                except DemoError as exc:
+                    # A deliberate, documented failure used by the preview to
+                    # exercise its error state. Nothing is broken.
+                    return _err(503, "demo_error", detail=str(exc))
             return _err(404, "not_found", detail=f"no route for GET {path}")
 
         def _route_post(
