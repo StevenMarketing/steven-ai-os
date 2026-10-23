@@ -779,8 +779,13 @@ class DashboardEndpointTests(unittest.TestCase):
         thread.start()
         try:
             host, port = server.server_address[:2]
+            # Use a proxy-free opener: the process-global opener may have cached
+            # a proxy map (built by an earlier test while http_proxy was set), and
+            # the cleared environment below also removes no_proxy, so a global
+            # urlopen would send this 127.0.0.1 request to the proxy and reset.
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
             with mock.patch.dict(os.environ, {}, clear=True):
-                with urllib.request.urlopen(
+                with opener.open(
                         f"http://{host}:{port}/api/google/connections", timeout=10) as resp:
                     body = json.loads(resp.read().decode())
             self.assertEqual(body, {"live": False, "connections": []})
