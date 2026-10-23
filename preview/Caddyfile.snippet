@@ -1,0 +1,18 @@
+# Caddy site block for the PRIVATE GReply preview -- DEMO ONLY.
+#
+# Append this into /etc/caddy/Caddyfile on the owner's VPS, then reload Caddy:
+#   sudo systemctl reload caddy
+#
+# Caddy obtains and renews the TLS certificate automatically (ACME), so the
+# hostname must already resolve to this VPS (A/AAAA record) before the first
+# reload -- otherwise the certificate request fails. No manual certificate and
+# no private key on disk to manage.
+#
+# The upstream is LOOPBACK ONLY: preview/steven-preview.service publishes the
+# container on 127.0.0.1:8080 and nothing else, so the preview is reachable
+# only through Caddy (which still requires the app's own login).
+
+preview.adzdigital.com {
+	encode zstd gzip
+	reverse_proxy 127.0.0.1:8080
+}

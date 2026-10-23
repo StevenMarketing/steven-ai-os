@@ -3,9 +3,8 @@
 #
 # The preview is fixtures-only and login-gated. This script refuses to start
 # unless preview/guard.py approves the environment. It then binds the app to
-# LOOPBACK ONLY and lets the platform's private network be the only way in
-# (a Fly 6PN tunnel / `fly proxy`, or a cloudflared sidecar on localhost).
-# There is deliberately no public port and no anonymous mode.
+# LOOPBACK ONLY; on the owner's VPS a reverse proxy (Caddy) on the same host is
+# the only way in. There is deliberately no public port and no anonymous mode.
 set -eu
 
 HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
@@ -24,8 +23,8 @@ PORT="${PORT:-8080}"
 export PYTHONPATH="$APP_ROOT/src"
 
 # Loopback only. scripts/serve_ui.py itself rejects a non-loopback host, so a
-# misconfiguration can never expose the dashboard directly. The private network
-# sidecar (running in the same pod) is what fronts it.
+# misconfiguration can never expose the dashboard directly. A same-host reverse
+# proxy (Caddy, see preview/Caddyfile.snippet) is what fronts it.
 exec python3 scripts/serve_ui.py \
     --auth \
     --host 127.0.0.1 \

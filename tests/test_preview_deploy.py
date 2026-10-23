@@ -1,10 +1,14 @@
 """Offline tests for the private GReply preview deployment path (issue #73).
 
+Issue #103 re-platforms the preview from Fly.io to the owner's VPS: a systemd
+unit runs the container on loopback only and Caddy terminates HTTPS in front of
+it. These tests assert the VPS artifacts and the unchanged fail-closed guard.
+
 Standard library only. Nothing here deploys, opens a port to the world, calls
 Google or reads a real secret: the guard is exercised as a pure function, the
-container/platform config is checked as text, and the one live test starts the
-real app on loopback with an ephemeral port to prove unauthenticated API access
-is denied.
+container/service/Caddy config is checked as text, and the one live test starts
+the real app on loopback with an ephemeral port to prove unauthenticated API
+access is denied.
 
 Run with:
     cd /opt/data/gbp-integration && PYTHONPATH=src python3 -m unittest tests.test_preview_deploy -v
@@ -33,6 +37,8 @@ from gbp.api.server import create_server  # noqa: E402
 PREVIEW_DIR = os.path.join(_ROOT, "preview")
 ENTRYPOINT = os.path.join(PREVIEW_DIR, "entrypoint.sh")
 DOCKERFILE = os.path.join(PREVIEW_DIR, "Dockerfile")
+SERVICE_UNIT = os.path.join(PREVIEW_DIR, "steven-preview.service")
+CADDY_SNIPPET = os.path.join(PREVIEW_DIR, "Caddyfile.snippet")
 FLY_TOML = os.path.join(PREVIEW_DIR, "fly.toml")
 RUNBOOK = os.path.join(_ROOT, "docs", "PREVIEW-DEPLOY.md")
 
@@ -116,11 +122,16 @@ class PreviewConfigTest(unittest.TestCase):
     def setUp(self):
         self.entrypoint = _read(ENTRYPOINT)
         self.dockerfile = _read(DOCKERFILE)
-        self.fly = _read(FLY_TOML)
+        self.service = _read(SERVICE_UNIT)
+        self.caddy = _read(CADDY_SNIPPET)
         # Comments may *describe* a forbidden directive; only real config lines
-        # count. Bracketed sections/keys are what Fly actually parses.
-        self.fly_config = "\n".join(
-            line for line in self.fly.splitlines()
+        # count. Strip comment lines before asserting on the unit/site block.
+        self.service_config = "\n".join(
+            line for line in self.service.splitlines()
+            if not line.lstrip().startswith("#")
+        )
+        self.caddy_config = "\n".join(
+            line for line in self.caddy.splitlines()
             if not line.lstrip().startswith("#")
         )
 
@@ -141,21 +152,47 @@ class PreviewConfigTest(unittest.TestCase):
         self.assertNotIn("ENV GBP_SESSION_SECRET", self.dockerfile)
         self.assertNotIn("ENV GBP_DEMO_PASSWORD", self.dockerfile)
 
-    def test_fly_config_is_private(self):
-        self.assertNotIn("[http_service]", self.fly_config)
-        self.assertNotIn("ports = [", self.fly_config)
-        self.assertIn("port = 8080", self.fly_config)
-        self.assertIn("dockerfile = \"preview/Dockerfile\"", self.fly_config)
-        self.assertRegex(self.fly_config, r"\[checks\.health\]")
-        self.assertIn("path = \"/\"", self.fly_config)
+    def test_no_fly_configuration_remains(self):
+        # Issue #103: the Fly.io path is gone from the repository.
+        self.assertFalse(os.path.exists(FLY_TOML))
 
-    def test_runbook_documents_options_costs_and_approvals(self):
+    def test_systemd_unit_publishes_on_loopback_only(self):
+        self.assertIn("ExecStart=", self.service_config)
+        self.assertIn("docker run", self.service_config)
+        # Secrets come from a server-side env file, never an inline value.
+        self.assertIn("--env-file /etc/steven-preview/preview.env",
+                      self.service_config)
+        # The only published address is loopback:8080.
+        self.assertIn("127.0.0.1:8080:8080", self.service_config)
+        self.assertNotIn("0.0.0.0", self.service_config)
+        self.assertNotIn("--privileged", self.service_config)
+        # It is a real, restartable unit.
+        self.assertIn("Restart=on-failure", self.service_config)
+        self.assertIn("WantedBy=multi-user.target", self.service_config)
+        # No secret can be baked into the unit.
+        self.assertNotIn("GBP_SESSION_SECRET=", self.service_config)
+        self.assertNotIn("GBP_DEMO_PASSWORD=", self.service_config)
+
+    def test_caddy_snippet_proxies_loopback_only(self):
+        self.assertIn("preview.adzdigital.com", self.caddy_config)
+        self.assertRegex(self.caddy_config, r"preview\.adzdigital\.com\s*\{")
+        self.assertIn("reverse_proxy 127.0.0.1:8080", self.caddy_config)
+        self.assertNotIn("0.0.0.0", self.caddy_config)
+
+    def test_runbook_documents_vps_options_costs_and_approvals(self):
         runbook = _read(RUNBOOK)
         for heading in ("## Options", "## Costs", "## Approvals required",
                         "## Health check, logs, rollback"):
             self.assertIn(heading, runbook)
         self.assertIn("NOT deployed", runbook)
         self.assertRegex(runbook, r"No invented link")
+        # The runbook describes the VPS flow, not the retired Fly.io one.
+        self.assertIn("steven-preview", runbook)
+        self.assertIn("preview.adzdigital.com", runbook)
+        self.assertIn("127.0.0.1:8080", runbook)
+        self.assertIn("systemd", runbook)
+        self.assertIn("mode-0600", runbook)
+        self.assertIn("supersedes", runbook)
 
 
 class PreviewUnauthenticatedAccessTest(unittest.TestCase):

@@ -1,0 +1,44 @@
+# systemd unit for the PRIVATE GReply preview on the owner's VPS. DEMO ONLY.
+#
+# The preview is fixtures-only and login-gated. This unit runs the image built
+# from preview/Dockerfile, publishes it on LOOPBACK ONLY (127.0.0.1:8080) and
+# reads every secret from an env file that lives on the server, outside the
+# repository, mode 0600. Nothing is deployed by the repository itself.
+#
+# Install (after explicit owner approval -- see docs/PREVIEW-DEPLOY.md):
+#   sudo install -d -m 0755 /etc/steven-preview
+#   sudo install -m 0600 /dev/null /etc/steven-preview/preview.env   # then fill it in
+#   sudo install -m 0644 preview/steven-preview.service \
+#        /etc/systemd/system/steven-preview.service
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now steven-preview
+#
+# The env file must contain exactly the three keys the guard requires:
+#   GBP_PREVIEW=1
+#   GBP_SESSION_SECRET=<at least 32 characters>
+#   GBP_DEMO_PASSWORD=<strong password>
+# Generate them ON THE SERVER and never paste a value into the repository, an
+# issue or a chat. preview/guard.py refuses to start if any of them is missing
+# or weak, or if a live-Google/production variable is present.
+
+[Unit]
+Description=GReply private preview (DEMO ONLY - fixtures only, login-gated)
+Documentation=file:/opt/greply-preview/docs/PREVIEW-DEPLOY.md
+Requires=docker.service
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStartPre=-/usr/bin/docker rm --force steven-preview
+ExecStart=/usr/bin/docker run --rm --name steven-preview \
+    --env-file /etc/steven-preview/preview.env \
+    --publish 127.0.0.1:8080:8080 \
+    greply-preview:latest
+ExecStop=/usr/bin/docker stop --time 10 steven-preview
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target
