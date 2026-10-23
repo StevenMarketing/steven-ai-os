@@ -254,11 +254,14 @@ class DescriptionServicesCoherenceTests(unittest.TestCase):
 
 
 class HoursTests(unittest.TestCase):
-    def test_invalid_range_and_missing_days(self):
+    def test_overnight_and_missing_days(self):
+        # Issue #105: 19:00-09:00 crosses midnight, so it is the low-severity
+        # SEO-HOURS-OVERNIGHT note, not an invalid-range error.
         loc = audit_location(_profile(hours={"monday": {"open": "19:00",
                                                         "close": "09:00"}}))
         codes = _codes(loc)
-        self.assertIn("SEO-HOURS-INVALID-RANGE", codes)
+        self.assertIn("SEO-HOURS-OVERNIGHT", codes)
+        self.assertNotIn("SEO-HOURS-INVALID-RANGE", codes)
         self.assertIn("SEO-HOURS-DAY-MISSING", codes)
 
     def test_malformed_time_and_shape(self):
@@ -308,11 +311,14 @@ class MidnightCloseTests(unittest.TestCase):
         self.assertEqual(loc.findings, [], _codes(loc))
         self.assertEqual(loc.score, 100)
 
-    def test_inverted_range_still_flagged(self):
+    def test_inverted_range_is_now_an_overnight_note(self):
+        # Issue #105: a start > end span is overnight, no longer invalid-range.
         hours = {day: {"open": "09:00", "close": "19:00"} for day in seo._WEEKDAYS}
         hours["monday"] = {"open": "19:00", "close": "09:00"}
         loc = audit_location(_profile(hours=hours))
-        self.assertIn("SEO-HOURS-INVALID-RANGE", _codes(loc))
+        codes = _codes(loc)
+        self.assertIn("SEO-HOURS-OVERNIGHT", codes)
+        self.assertNotIn("SEO-HOURS-INVALID-RANGE", codes)
 
     def test_open_equals_close_still_flagged(self):
         hours = {day: {"open": "09:00", "close": "19:00"} for day in seo._WEEKDAYS}
@@ -327,13 +333,15 @@ class MidnightCloseTests(unittest.TestCase):
         loc = audit_location(_profile(hours=hours))
         self.assertIn("SEO-HOURS-INVALID-RANGE", _codes(loc))
 
-    def test_general_overnight_window_still_flagged(self):
-        # Explicitly OUT of scope: only a 00:00 close is special-cased, so a
-        # 22:00-02:00 window keeps its invalid-range finding.
+    def test_general_overnight_window_is_a_note(self):
+        # Issue #105 (owner decision): a 22:00-02:00 span crosses midnight and is
+        # now a low-severity note to verify, not an invalid-range error.
         hours = {day: {"open": "09:00", "close": "19:00"} for day in seo._WEEKDAYS}
         hours["monday"] = {"open": "22:00", "close": "02:00"}
         loc = audit_location(_profile(hours=hours))
-        self.assertIn("SEO-HOURS-INVALID-RANGE", _codes(loc))
+        codes = _codes(loc)
+        self.assertIn("SEO-HOURS-OVERNIGHT", codes)
+        self.assertNotIn("SEO-HOURS-INVALID-RANGE", codes)
 
     def test_malformed_close_is_unchanged(self):
         hours = {day: {"open": "09:00", "close": "19:00"} for day in seo._WEEKDAYS}
@@ -341,6 +349,56 @@ class MidnightCloseTests(unittest.TestCase):
         loc = audit_location(_profile(hours=hours))
         codes = _codes(loc)
         self.assertIn("SEO-HOURS-MALFORMED", codes)
+        self.assertNotIn("SEO-HOURS-INVALID-RANGE", codes)
+
+
+class OvernightHoursTests(unittest.TestCase):
+    """Issue #105: a span that crosses midnight is a low-severity note, not an
+    invalid-range error, and never lowers the completeness score."""
+
+    def _overnight_profile(self, open_, close):
+        hours = {day: {"open": "09:00", "close": "19:00"} for day in seo._WEEKDAYS}
+        hours["monday"] = {"open": open_, "close": close}
+        return _profile(hours=hours)
+
+    def test_22_00_to_02_00_is_a_low_severity_note(self):
+        loc = audit_location(self._overnight_profile("22:00", "02:00"))
+        overnight = [f for f in loc.findings if f.code == "SEO-HOURS-OVERNIGHT"]
+        self.assertEqual(len(overnight), 1, _codes(loc))
+        self.assertEqual(overnight[0].severity, "low")
+        self.assertNotIn("SEO-HOURS-INVALID-RANGE", _codes(loc))
+
+    def test_overnight_note_does_not_change_the_score(self):
+        # Same profile, one day overnight vs a normal day: identical score,
+        # because SEO-HOURS-OVERNIGHT is informational (non-scoring).
+        baseline = audit_location(_profile())
+        overnight = audit_location(self._overnight_profile("22:00", "02:00"))
+        self.assertEqual(baseline.score, overnight.score)
+        self.assertEqual(overnight.score, 100)
+
+    def test_19_00_to_09_00_is_overnight(self):
+        codes = _codes(audit_location(self._overnight_profile("19:00", "09:00")))
+        self.assertIn("SEO-HOURS-OVERNIGHT", codes)
+        self.assertNotIn("SEO-HOURS-INVALID-RANGE", codes)
+
+    def test_09_00_to_midnight_close_has_no_finding(self):
+        # Issue #98 stays untouched: a 00:00 close is 24:00, so this is valid.
+        loc = audit_location(self._overnight_profile("09:00", "00:00"))
+        self.assertEqual(loc.findings, [], _codes(loc))
+        self.assertEqual(loc.score, 100)
+
+    def test_00_00_to_00_00_stays_invalid_range(self):
+        # start == end is not overnight: it is a zero-length range.
+        loc = audit_location(self._overnight_profile("00:00", "00:00"))
+        codes = _codes(loc)
+        self.assertIn("SEO-HOURS-INVALID-RANGE", codes)
+        self.assertNotIn("SEO-HOURS-OVERNIGHT", codes)
+
+    def test_garbage_time_stays_malformed(self):
+        loc = audit_location(self._overnight_profile("22:00", "not-a-time"))
+        codes = _codes(loc)
+        self.assertIn("SEO-HOURS-MALFORMED", codes)
+        self.assertNotIn("SEO-HOURS-OVERNIGHT", codes)
         self.assertNotIn("SEO-HOURS-INVALID-RANGE", codes)
 
 
