@@ -110,11 +110,21 @@ class GoogleConnectWiring:
         from gbp.client.http_client import HttpClient
         from gbp.sync.live_sync import LiveLocationSync
 
+        # Issue #119: an expired access token can only be refreshed when
+        # ``LiveLocationSync``'s token provider receives a REAL transport.
+        # ``TokenVault.get_valid(tenant, transport=None)`` raises
+        # ``refresh_transport_missing`` the moment the 1-hour access token
+        # lapses, so every server sync path MUST hand over a guard-passing
+        # transport -- the same one the code exchange uses (``_transport()``).
+        # It stays socket-free until the operator opts in, because
+        # ``UrllibTransport`` refuses a Google host without
+        # ``GBP_ALLOW_LIVE_GOOGLE=1``.
+        refresh_transport = self._transport()
         http = None
         if self._api_transport is not None:
             http = HttpClient(self._api_transport)
         return LiveLocationSync(
-            vault, tenant, http=http,
+            vault, tenant, http=http, transport=refresh_transport,
             client_id=config.client_id, client_secret=config.client_secret)
 
     # -- routes ---------------------------------------------------------- #
