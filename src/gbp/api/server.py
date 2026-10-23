@@ -784,6 +784,16 @@ def _reviews_page(rows: List[Dict[str, Any]], query: Dict[str, Any]) -> Dict[str
         rows = [r for r in rows if term in " ".join(
             str(r.get(k) or "") for k in
             ("comment", "business_name", "reviewer_name", "postal_code")).lower()]
+    # Increment 1 (Issue #71): the unanswered view the salon switcher needs. A review counts as
+    # answered only when its newest reply is approved or sent; a reply still in draft - or edited
+    # back to draft - means the salon still owes an answer. Reuses the row fields the join already
+    # provides, so no extra query is introduced.
+    _raw_unanswered = (query or {}).get("unanswered")
+    if isinstance(_raw_unanswered, (list, tuple)):
+        _raw_unanswered = _raw_unanswered[0] if _raw_unanswered else ""
+    unanswered = str(_raw_unanswered or "").strip().lower() in ("1", "true", "yes", "on")
+    if unanswered:
+        rows = [r for r in rows if str(r.get("status")) not in ("approved", "sent")]
 
     sort = (_first(query, "sort") or "review_date").lower()
     order = (_first(query, "order") or "desc").lower()
