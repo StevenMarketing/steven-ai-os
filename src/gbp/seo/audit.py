@@ -44,6 +44,7 @@ __all__ = [
     "audit_location",
     "audit_profiles",
     "load_profiles",
+    "photo_total",
     "severity_rank",
 ]
 
@@ -151,6 +152,30 @@ NAIL_SERVICE_VOCABULARY: Tuple[str, ...] = (
     "nail extensions",
     "spa pedicure",
 )
+
+# --------------------------------------------------------------------------
+# Tier 1 check groups (issue #107): photos and review health.
+#
+# Findings from these groups score normally -- only the informational codes in
+# ``_NON_SCORING_CODES`` are excluded from the completeness score. The numeric
+# thresholds below are documented product heuristics (see ``docs/SEO-AUDIT.md``);
+# Google publishes no photo or review minimum, so they rank advice, not rank.
+# --------------------------------------------------------------------------
+#: Working floor for a *visual* service (heuristic): a listing with fewer than
+#: 10 photos shows too thin a gallery to convey the shop's range. Google
+#: publishes no photo minimum, so this is a documented product heuristic, not a
+#: ranking factor.
+_PHOTOS_TOO_FEW_MIN = 10
+#: A 4.0 average is the conventional "customers are broadly happy" line
+#: (heuristic): below it the ratings themselves signal a problem worth
+#: surfacing. Product heuristic, not a Google metric.
+_RATING_MIN = 4.0
+#: Minimum review base for a salon to give searchers social proof (heuristic):
+#: under 20 reviews the listing carries too little. Product heuristic.
+_REVIEW_COUNT_MIN = 20
+#: Unanswered-review thresholds (heuristic): 1-9 unanswered is a low-severity
+#: backlog; 10 or more is a medium-severity signal that replies are neglected.
+_UNANSWERED_MEDIUM_MIN = 10
 
 
 def severity_rank(severity: str) -> int:
@@ -282,6 +307,47 @@ def _lower(value: Any) -> str:
     return _norm(value).lower()
 
 
+def _as_number(value: Any) -> Optional[float]:
+    """Coerce a fixture value to a float, or None when it is not numeric.
+
+    Used for the optional review ``rating``: a number, or a numeric string, is
+    accepted; anything else (a mapping, a list, non-numeric text or a bool) is
+    reported as malformed rather than guessed. Never raises.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value.strip())
+        except ValueError:
+            return None
+    return None
+
+
+def _as_int(value: Any) -> Optional[int]:
+    """Coerce a fixture value to a non-negative int, or None when not a count.
+
+    Accepts an int, an integral float, or a numeric string; rejects booleans,
+    negatives and anything non-numeric, so a malformed count is reported rather
+    than coerced. Never raises.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value >= 0 else None
+    if isinstance(value, float):
+        return int(value) if value.is_integer() and value >= 0 else None
+    if isinstance(value, str):
+        try:
+            number = float(value.strip())
+        except ValueError:
+            return None
+        return int(number) if number.is_integer() and number >= 0 else None
+    return None
+
+
 def _as_list(value: Any) -> List[str]:
     """Coerce a fixture field into a list of non-empty trimmed strings."""
     if value is None:
@@ -327,6 +393,62 @@ def _finding(code: str, severity: str, fld: str, message: str,
              evidence: str = "", recommendation: str = "") -> Finding:
     return Finding(code=code, severity=severity, field=fld, message=message,
                    evidence=evidence, recommendation=recommendation)
+
+
+def _parse_photos(value: Any
+                  ) -> Tuple[Optional[int], Optional[Dict[str, int]], bool]:
+    """Tolerant parse of the optional ``photos`` field (issue #107).
+
+    The field is either a non-negative integer total, or a mapping of integer
+    counts ``{total, exterior, interior, work}``. Returns
+    ``(total, categories, malformed)``:
+
+    * a missing or empty value -> ``(None, None, False)`` (the caller reports
+      ``SEO-PHOTOS-NONE``: a listing with no photos);
+    * a mapping -> ``total`` falls back to the sum of the category counts when
+      ``total`` itself is not given, and ``categories`` carries only the counts
+      the fixture actually provides, so a category it omits is never judged;
+    * anything else (a string, a list, a negative or non-numeric count) ->
+      ``malformed`` is True, so the caller reports it instead of inventing a
+      count. Never raises.
+    """
+    if value is None or (isinstance(value, dict) and not value):
+        return None, None, False
+    if isinstance(value, dict):
+        categories: Dict[str, int] = {}
+        malformed = False
+        for key in ("exterior", "interior", "work"):
+            if key in value and value[key] is not None:
+                count = _as_int(value[key])
+                if count is None:
+                    malformed = True
+                else:
+                    categories[key] = count
+        raw_total = value.get("total")
+        total = _as_int(raw_total) if raw_total is not None else None
+        if raw_total is not None and total is None:
+            malformed = True
+        if total is None:
+            total = sum(categories.values()) if categories else None
+        if total is None and not categories and not malformed:
+            malformed = True
+        return total, (categories or None), malformed
+    total = _as_int(value)
+    if total is None:
+        return None, None, True
+    return total, None, False
+
+
+def photo_total(profile: Dict[str, Any]) -> Optional[int]:
+    """The profile's photo total, or None when the field is absent/malformed.
+
+    A public, side-effect-free helper so the gap analysis can benchmark photo
+    counts from the same parse the audit uses; the two can never disagree.
+    """
+    if not isinstance(profile, dict):
+        return None
+    total, _categories, malformed = _parse_photos(profile.get("photos"))
+    return None if malformed else total
 
 
 _WORD_RE = re.compile(r"[a-z0-9]+")
@@ -660,6 +782,121 @@ def _check_hours(profile: Dict[str, Any]) -> List[Finding]:
     return out
 
 
+def _check_photos(profile: Dict[str, Any]) -> List[Finding]:
+    """Photo checks (issue #107). Never raises on malformed input.
+
+    Absent (or zero) photos are reported -- unlike review data, a photo gallery
+    is part of the profile itself, so "no photos" is a profile defect. When the
+    field is a mapping that carries per-category counts, a category with zero
+    photos is reported too. A malformed value is reported, never guessed.
+    """
+    total, categories, malformed = _parse_photos(profile.get("photos"))
+    if malformed:
+        return [_finding(
+            "SEO-PROFILE-MALFORMED", "medium", "photos",
+            "photos is not a valid photo count or count mapping.",
+            evidence=f"photos={profile.get('photos')!r}",
+            recommendation=("Provide photos as an integer total or a "
+                            "{total, exterior, interior, work} mapping of "
+                            "integer counts."))]
+    out: List[Finding] = []
+    if total is None or total == 0:
+        out.append(_finding(
+            "SEO-PHOTOS-NONE", "medium", "photos",
+            "The listing has no photos.",
+            evidence=("photos=<absent>" if total is None else "total=0"),
+            recommendation=("Add real photos of the shop -- exterior, interior "
+                            "and your work -- so customers can see what to "
+                            "expect.")))
+    elif total < _PHOTOS_TOO_FEW_MIN:
+        out.append(_finding(
+            "SEO-PHOTOS-TOO-FEW", "low", "photos",
+            "The listing has fewer photos than the recommended working minimum.",
+            evidence=f"total={total} (min {_PHOTOS_TOO_FEW_MIN})",
+            recommendation=(f"Add more photos (at least {_PHOTOS_TOO_FEW_MIN} "
+                            "in total) covering the exterior, the interior and "
+                            "your work.")))
+    if categories:
+        for key, code, label in (
+                ("exterior", "SEO-PHOTOS-NO-EXTERIOR", "exterior (storefront)"),
+                ("interior", "SEO-PHOTOS-NO-INTERIOR", "interior"),
+                ("work", "SEO-PHOTOS-NO-WORK", "work/result")):
+            if categories.get(key) == 0:
+                out.append(_finding(
+                    code, "low", "photos",
+                    f"No {label} photos on the listing.",
+                    evidence=f"{key}=0",
+                    recommendation=(f"Add {label} photos so the listing shows "
+                                    "that part of the business.")))
+    return out
+
+
+def _check_reviews(profile: Dict[str, Any]) -> List[Finding]:
+    """Review-health checks (issue #107).
+
+    Every review field is optional and arrives from a separate pipeline, so a
+    field that is absent (or explicitly ``null``) keeps its check silent --
+    absence is not a profile defect. A field that is present but malformed is
+    reported, never coerced, so a bad value cannot crash the audit.
+    """
+    out: List[Finding] = []
+    rating = profile.get("rating")
+    if rating is not None:
+        value = _as_number(rating)
+        if value is None:
+            out.append(_finding(
+                "SEO-PROFILE-MALFORMED", "medium", "rating",
+                "rating is not a number.", evidence=f"rating={rating!r}",
+                recommendation="Provide rating as a number (e.g. 4.6)."))
+        elif value < _RATING_MIN:
+            out.append(_finding(
+                "SEO-REVIEWS-LOW-RATING", "medium", "rating",
+                "Average rating is below the recommended minimum.",
+                evidence=f"rating={value} (min {_RATING_MIN})",
+                recommendation=("Improve service quality and reply to reviews; "
+                                "an average below 4.0 deters new customers.")))
+    count = profile.get("review_count")
+    if count is not None:
+        value = _as_int(count)
+        if value is None:
+            out.append(_finding(
+                "SEO-PROFILE-MALFORMED", "medium", "review_count",
+                "review_count is not a non-negative integer.",
+                evidence=f"review_count={count!r}",
+                recommendation="Provide review_count as an integer."))
+        elif value < _REVIEW_COUNT_MIN:
+            out.append(_finding(
+                "SEO-REVIEWS-TOO-FEW", "low", "review_count",
+                "Fewer reviews than the recommended working minimum.",
+                evidence=f"review_count={value} (min {_REVIEW_COUNT_MIN})",
+                recommendation=("Ask satisfied customers for reviews; a larger "
+                                "review base gives new customers more "
+                                "confidence.")))
+    unanswered = profile.get("unanswered_reviews")
+    if unanswered is not None:
+        value = _as_int(unanswered)
+        if value is None:
+            out.append(_finding(
+                "SEO-PROFILE-MALFORMED", "medium", "unanswered_reviews",
+                "unanswered_reviews is not a non-negative integer.",
+                evidence=f"unanswered_reviews={unanswered!r}",
+                recommendation="Provide unanswered_reviews as an integer."))
+        elif value >= _UNANSWERED_MEDIUM_MIN:
+            out.append(_finding(
+                "SEO-REVIEWS-UNANSWERED", "medium", "unanswered_reviews",
+                "A large backlog of reviews has no reply.",
+                evidence=f"unanswered_reviews={value}",
+                recommendation=("Reply to every review; a backlog this size "
+                                "signals that replies are being neglected.")))
+        elif value >= 1:
+            out.append(_finding(
+                "SEO-REVIEWS-UNANSWERED", "low", "unanswered_reviews",
+                "Some reviews have no reply.",
+                evidence=f"unanswered_reviews={value}",
+                recommendation="Reply to the reviews that are still waiting."))
+    return out
+
+
 # --------------------------------------------------------------------------
 # per-location and whole-account entry points
 # --------------------------------------------------------------------------
@@ -675,6 +912,8 @@ def audit_location(profile: Dict[str, Any]) -> LocationAudit:
     findings += _check_description(profile)
     findings += _check_description_services_coherence(profile)
     findings += _check_hours(profile)
+    findings += _check_photos(profile)
+    findings += _check_reviews(profile)
     return LocationAudit(
         location_name=_norm(profile.get("location_name")),
         title=_norm(profile.get("title")),
@@ -764,6 +1003,7 @@ DEFAULT_PROFILES: List[Dict[str, Any]] = [
         "hours": _full_hours(),
         "phone": "+1 714-555-0142",
         "website": "https://example.invalid/demo-nails",
+        "photos": {"total": 24, "exterior": 6, "interior": 8, "work": 10},
         "_fixture": True,
     },
     {

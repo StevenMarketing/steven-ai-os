@@ -92,6 +92,8 @@ def _complete_profile(index: int, zipcode: str) -> dict:
                               "friday", "saturday", "sunday")},
         "phone": "+1 714-555-0100",
         "website": "https://example.invalid/chain",
+        # A complete shop carries photos (issue #107).
+        "photos": {"total": 24, "exterior": 8, "interior": 8, "work": 8},
     }
 
 

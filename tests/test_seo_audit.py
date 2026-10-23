@@ -46,6 +46,8 @@ def _profile(**overrides):
         "hours": {day: {"open": "09:00", "close": "19:00"} for day in seo._WEEKDAYS},
         "phone": "+1 714-555-0100",
         "website": "https://example.invalid/fixture",
+        # A complete shop carries photos (issue #107); tests override as needed.
+        "photos": {"total": 24, "exterior": 8, "interior": 8, "work": 8},
     }
     base.update(overrides)
     return base
@@ -340,6 +342,184 @@ class MidnightCloseTests(unittest.TestCase):
         codes = _codes(loc)
         self.assertIn("SEO-HOURS-MALFORMED", codes)
         self.assertNotIn("SEO-HOURS-INVALID-RANGE", codes)
+
+
+class PhotoTests(unittest.TestCase):
+    """Issue #107: photo checks (new check group, field ``photos``)."""
+
+    def test_photos_absent_is_a_medium_finding(self):
+        profile = _profile()
+        del profile["photos"]
+        loc = audit_location(profile)
+        finding = [f for f in loc.findings if f.code == "SEO-PHOTOS-NONE"]
+        self.assertEqual(len(finding), 1, _codes(loc))
+        self.assertEqual(finding[0].severity, "medium")
+        self.assertEqual(finding[0].field, "photos")
+        self.assertTrue(finding[0].recommendation)
+        self.assertEqual(loc.score, 93)          # medium penalty 7, scores normally
+
+    def test_total_zero_is_reported_like_absent(self):
+        for value in (0, {"total": 0}):
+            with self.subTest(photos=value):
+                loc = audit_location(_profile(photos=value))
+                self.assertIn("SEO-PHOTOS-NONE", _codes(loc))
+                self.assertNotIn("SEO-PHOTOS-TOO-FEW", _codes(loc))
+
+    def test_too_few_boundary(self):
+        few = audit_location(_profile(photos=9))
+        self.assertIn("SEO-PHOTOS-TOO-FEW", _codes(few))
+        self.assertEqual(
+            [f.severity for f in few.findings if f.code == "SEO-PHOTOS-TOO-FEW"],
+            ["low"])
+        at_floor = audit_location(_profile(photos=10))
+        self.assertNotIn("SEO-PHOTOS-TOO-FEW", _codes(at_floor))
+        self.assertNotIn("SEO-PHOTOS-NONE", _codes(at_floor))
+
+    def test_integer_total_is_accepted(self):
+        loc = audit_location(_profile(photos=15))
+        for code in ("SEO-PHOTOS-NONE", "SEO-PHOTOS-TOO-FEW",
+                     "SEO-PHOTOS-NO-EXTERIOR", "SEO-PHOTOS-NO-INTERIOR",
+                     "SEO-PHOTOS-NO-WORK"):
+            self.assertNotIn(code, _codes(loc))
+
+    def test_mapping_category_counts_of_zero_are_flagged(self):
+        cases = {
+            "SEO-PHOTOS-NO-EXTERIOR": {"total": 20, "exterior": 0,
+                                       "interior": 5, "work": 5},
+            "SEO-PHOTOS-NO-INTERIOR": {"total": 20, "exterior": 5,
+                                       "interior": 0, "work": 5},
+            "SEO-PHOTOS-NO-WORK": {"total": 20, "exterior": 5,
+                                   "interior": 5, "work": 0},
+        }
+        for code, photos in cases.items():
+            with self.subTest(code=code):
+                loc = audit_location(_profile(photos=photos))
+                self.assertIn(code, _codes(loc))
+                finding = [f for f in loc.findings if f.code == code][0]
+                self.assertEqual(finding.severity, "low")
+                self.assertIn("=0", finding.evidence)
+
+    def test_mapping_total_derives_from_category_counts(self):
+        # No explicit ``total``: the checks sum the categories, no invention.
+        loc = audit_location(_profile(photos={"exterior": 4, "interior": 4,
+                                              "work": 4}))
+        for code in ("SEO-PHOTOS-NONE", "SEO-PHOTOS-TOO-FEW",
+                     "SEO-PHOTOS-NO-EXTERIOR"):
+            self.assertNotIn(code, _codes(loc))
+
+    def test_omitted_category_is_not_judged(self):
+        loc = audit_location(_profile(photos={"total": 20, "exterior": 5}))
+        self.assertNotIn("SEO-PHOTOS-NO-INTERIOR", _codes(loc))
+        self.assertNotIn("SEO-PHOTOS-NO-WORK", _codes(loc))
+
+    def test_empty_mapping_is_read_as_absent(self):
+        loc = audit_location(_profile(photos={}))
+        self.assertIn("SEO-PHOTOS-NONE", _codes(loc))
+        self.assertNotIn("SEO-PROFILE-MALFORMED", _codes(loc))
+
+    def test_malformed_photos_never_crash(self):
+        for value in ("lots", -3, [1, 2], 3.5, True,
+                      {"total": "x"}, {"exterior": -1}, {"exterior": "x"},
+                      {"foo": 1}):
+            with self.subTest(photos=value):
+                loc = audit_location(_profile(photos=value))
+                self.assertIn("SEO-PROFILE-MALFORMED", _codes(loc))
+                self.assertNotIn("SEO-PHOTOS-NONE", _codes(loc))
+
+    def test_photos_is_not_a_required_field(self):
+        self.assertNotIn("photos", seo.REQUIRED_FIELDS)
+        # A profile with no photograph key is not flagged as a missing field.
+        profile = _profile()
+        del profile["photos"]
+        missing = [f.field for f in audit_location(profile).findings
+                   if f.code == "SEO-MISSING-FIELD"]
+        self.assertNotIn("photos", missing)
+
+    def test_photo_total_helper(self):
+        self.assertEqual(seo.photo_total(_profile()), 24)
+        self.assertEqual(seo.photo_total({"photos": 7}), 7)
+        self.assertEqual(seo.photo_total({"photos": {"exterior": 2,
+                                                     "work": 3}}), 5)
+        self.assertIsNone(seo.photo_total({}))
+        self.assertIsNone(seo.photo_total({"photos": "nope"}))
+        self.assertIsNone(seo.photo_total("not-a-mapping"))  # type: ignore[arg-type]
+
+
+class ReviewHealthTests(unittest.TestCase):
+    """Issue #107: review-health checks (new check group)."""
+
+    _REVIEW_CODES = ("SEO-REVIEWS-LOW-RATING", "SEO-REVIEWS-TOO-FEW",
+                     "SEO-REVIEWS-UNANSWERED")
+
+    def test_absent_review_fields_are_silent(self):
+        loc = audit_location(_profile())
+        for code in self._REVIEW_CODES:
+            self.assertNotIn(code, _codes(loc))
+        self.assertEqual(loc.score, 100)
+
+    def test_explicit_nulls_are_silent(self):
+        loc = audit_location(_profile(rating=None, review_count=None,
+                                      unanswered_reviews=None))
+        for code in self._REVIEW_CODES:
+            self.assertNotIn(code, _codes(loc))
+        self.assertEqual(loc.score, 100)
+
+    def test_low_rating_is_medium(self):
+        finding = [f for f in audit_location(_profile(rating=3.9)).findings
+                   if f.code == "SEO-REVIEWS-LOW-RATING"]
+        self.assertEqual(len(finding), 1)
+        self.assertEqual(finding[0].severity, "medium")
+        self.assertEqual(finding[0].field, "rating")
+
+    def test_rating_at_or_above_the_floor_is_not_flagged(self):
+        for value in (4.0, 4.6, 5):
+            with self.subTest(rating=value):
+                loc = audit_location(_profile(rating=value))
+                self.assertNotIn("SEO-REVIEWS-LOW-RATING", _codes(loc))
+
+    def test_too_few_reviews_is_low(self):
+        finding = [f for f in audit_location(_profile(review_count=19)).findings
+                   if f.code == "SEO-REVIEWS-TOO-FEW"]
+        self.assertEqual(len(finding), 1)
+        self.assertEqual(finding[0].severity, "low")
+        self.assertNotIn("SEO-REVIEWS-TOO-FEW",
+                         _codes(audit_location(_profile(review_count=20))))
+
+    def test_unanswered_severity_split(self):
+        low_codes = {1, 9}
+        for value in low_codes:
+            finding = [f for f in audit_location(
+                _profile(unanswered_reviews=value)).findings
+                if f.code == "SEO-REVIEWS-UNANSWERED"]
+            self.assertEqual(finding[0].severity, "low", value)
+        finding = [f for f in audit_location(
+            _profile(unanswered_reviews=10)).findings
+            if f.code == "SEO-REVIEWS-UNANSWERED"]
+        self.assertEqual(finding[0].severity, "medium")
+        self.assertNotIn("SEO-REVIEWS-UNANSWERED",
+                         _codes(audit_location(_profile(unanswered_reviews=0))))
+
+    def test_malformed_review_data_never_crashes(self):
+        cases = ({"rating": "abc"}, {"rating": {}}, {"rating": [1]},
+                 {"review_count": "many"}, {"review_count": 1.5},
+                 {"unanswered_reviews": -1}, {"unanswered_reviews": {}})
+        for overrides in cases:
+            with self.subTest(overrides=overrides):
+                loc = audit_location(_profile(**overrides))
+                self.assertIn("SEO-PROFILE-MALFORMED", _codes(loc))
+                for code in self._REVIEW_CODES:
+                    self.assertNotIn(code, _codes(loc))
+
+    def test_review_findings_score_normally(self):
+        loc = audit_location(_profile(rating=3.0, review_count=5,
+                                      unanswered_reviews=12))
+        codes = _codes(loc)
+        self.assertIn("SEO-REVIEWS-LOW-RATING", codes)   # medium 7
+        self.assertIn("SEO-REVIEWS-TOO-FEW", codes)      # low 3
+        self.assertIn("SEO-REVIEWS-UNANSWERED", codes)   # medium 7
+        self.assertEqual(loc.score, 100 - 7 - 3 - 7)
+        for code in self._REVIEW_CODES:
+            self.assertNotIn(code, seo._NON_SCORING_CODES)
 
 
 class IdentityTests(unittest.TestCase):

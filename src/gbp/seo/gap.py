@@ -64,6 +64,7 @@ from .audit import (
     _minutes,
     _norm,
     audit_location,
+    photo_total,
 )
 
 __all__ = [
@@ -73,6 +74,7 @@ __all__ = [
     "FIELD_PRESENCE_FIELDS",
     "GAP_DISCLAIMER",
     "MODE",
+    "PHOTO_BENCHMARK_LABEL",
     "SCORE_LABEL",
     "SMALL_N_MINIMUM",
     "STATUS_INSUFFICIENT",
@@ -95,6 +97,9 @@ GAP_DISCLAIMER = (
 SCORE_LABEL = "heuristic completeness score (not a ranking score)"
 #: Label for the benchmark block.
 BENCHMARK_LABEL = "heuristic completeness"
+#: Label for the photo-count benchmark block (issue #107). It reports fixture
+#: photo counts only -- never a ranking or visibility measure.
+PHOTO_BENCHMARK_LABEL = "photo count (fixture)"
 
 MODE = "offline-competitor-gap"
 
@@ -286,6 +291,7 @@ class GapReport:
     services: Optional[Dict[str, Any]] = None
     secondary_categories: Optional[Dict[str, Any]] = None
     benchmarks: Optional[Dict[str, Any]] = None
+    photo_benchmark: Optional[Dict[str, Any]] = None
     field_presence: List[Dict[str, Any]] = field(default_factory=list)
     recommendations: List[Dict[str, str]] = field(default_factory=list)
 
@@ -327,6 +333,7 @@ class GapReport:
             "services": self.services,
             "secondary_categories": self.secondary_categories,
             "benchmarks": self.benchmarks,
+            "photo_benchmark": self.photo_benchmark,
             "field_presence": list(self.field_presence),
             "recommendations": list(self.recommendations),
         }
@@ -435,6 +442,30 @@ def _completeness_recommendation(benchmarks: Dict[str, Any]
                  f"{benchmarks['direct_competitors']} direct competitors; "
                  "consider working through this profile's audit findings. "
                  "Completeness only -- this is not a position or outcome claim."),
+    }]
+
+
+def _photo_recommendation(benchmark: Optional[Dict[str, Any]]
+                          ) -> List[Dict[str, str]]:
+    """Only emitted when the target's photo count is below the direct-set median.
+
+    Counts fixture photo totals only and never claims a ranking or visibility
+    outcome; wording is conditional and quotes the counts it compares.
+    """
+    if not benchmark or not benchmark.get("target_below_median"):
+        return []
+    competitors = benchmark["direct_competitors_with_photos"]
+    return [{
+        "kind": "photos",
+        "subject": "photos",
+        "evidence": (f"target {benchmark['target']} photos vs direct-set median "
+                     f"{benchmark['median']} across {competitors} direct "
+                     "competitors with photo counts"),
+        "text": (f"If the salon can add photos, consider doing so: the target "
+                 f"has {benchmark['target']} photos while the direct-set median "
+                 f"is {benchmark['median']} across {competitors} direct "
+                 "competitors with photo counts. Photo count only -- this is "
+                 "not a position or outcome claim."),
     }]
 
 
@@ -594,6 +625,28 @@ def analyze_gap(target: Dict[str, Any],
     }
     report.benchmarks = benchmarks
 
+    # ---- photo-count benchmark (issue #107) -------------------------------
+    # Reuses the audit engine's tolerant photo parse so the two never disagree.
+    # Only emitted when the target and at least one direct competitor carry a
+    # photo total; a competitor without one is simply not part of the median.
+    target_photos = photo_total(target)
+    competitor_photos = [total for total in
+                         (photo_total(profile) for profile in direct_profiles)
+                         if total is not None]
+    photo_median = _median(competitor_photos) if competitor_photos else None
+    if target_photos is not None and photo_median is not None:
+        report.photo_benchmark = {
+            "label": PHOTO_BENCHMARK_LABEL,
+            "target": target_photos,
+            "median": photo_median,
+            "min": min(competitor_photos),
+            "max": max(competitor_photos),
+            "direct_competitors_with_photos": len(competitor_photos),
+            "target_below_median": target_photos < photo_median,
+            "note": ("photo counts only: synthetic fixture counts, not a "
+                     "ranking or visibility measure, and no competitor is ranked"),
+        }
+
     presence: List[Dict[str, Any]] = []
     for key, label in FIELD_PRESENCE_FIELDS:
         check = _PRESENCE[key]
@@ -612,6 +665,7 @@ def analyze_gap(target: Dict[str, Any],
         + _category_recommendations(category_gaps, direct_count)
         + _field_recommendations(presence, direct_count)
         + _completeness_recommendation(benchmarks)
+        + _photo_recommendation(report.photo_benchmark)
     )
     return report
 
@@ -657,6 +711,8 @@ DEFAULT_TARGET: Dict[str, Any] = {
     "hours": _full_hours(),
     "phone": "+1 714-555-0142",
     "website": "https://example.invalid/demo-nails",
+    # Deliberately below the direct-set photo median (issue #107 fixture).
+    "photos": {"total": 12, "exterior": 4, "interior": 4, "work": 4},
     "_fixture": True,
 }
 
@@ -677,6 +733,7 @@ DEFAULT_COMPETITORS: List[Any] = [
         "hours": _full_hours(),
         "phone": "+1 714-555-0201",
         "website": "https://example.invalid/sunny-nails",
+        "photos": {"total": 30, "exterior": 10, "interior": 10, "work": 10},
         "_fixture": True,
     },
     {
@@ -690,6 +747,7 @@ DEFAULT_COMPETITORS: List[Any] = [
         "hours": _full_hours(),
         "phone": "+1 714-555-0202",
         # no website on purpose: exercises the field-presence benchmark
+        "photos": {"total": 20, "exterior": 7, "interior": 7, "work": 6},
         "_fixture": True,
     },
     {
@@ -706,6 +764,7 @@ DEFAULT_COMPETITORS: List[Any] = [
                   for day in _WEEKDAYS[:5]},
         "phone": "+1 714-555-0203",
         "website": "https://example.invalid/bloom-nails",
+        "photos": {"total": 25, "exterior": 9, "interior": 8, "work": 8},
         "_fixture": True,
     },
     {
