@@ -1173,6 +1173,13 @@ tr.seo-row.selected td { background: var(--brand-tint); }
 /* ------------------------------------------------------------------ */
 .google-connections { margin: var(--sp-4) 0 var(--sp-5); }
 .google-connections-table td.row-action { text-align: right; }
+/* Issue #117: "Sync now" + "Disconnect" share the action cell. */
+.row-actions-inline {
+  display: inline-flex;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
 .conn-state {
   display: inline-block;
   padding: 2px 10px;

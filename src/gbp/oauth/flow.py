@@ -196,6 +196,10 @@ def connection_rows(businesses: List[Dict[str, Any]], vault: TokenVault, *,
         entry["google_last_sync_at"] = (meta or {}).get("last_sync_at")
         entry["last_sync_at"] = (meta or {}).get("last_sync_at") or row.get("last_sync_at")
         entry["google_sync_status"] = (meta or {}).get("sync_status")
+        # Issue #117: the recorded failure reason (exception class / API error
+        # code only -- the vault never stores anything else here) so a failed
+        # sync is visible on the Google Connection row instead of a silent no-op.
+        entry["google_last_error"] = (meta or {}).get("last_error")
         out.append(entry)
     return out
 

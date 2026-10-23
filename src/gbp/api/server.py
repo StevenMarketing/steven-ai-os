@@ -224,6 +224,9 @@ RBAC_ROUTE_MATRIX: Dict[Tuple[str, str], Optional[str]] = {
     # location resource name resolved from the authorised location id.
     ("GET", "/api/google/connect"): "view",
     ("POST", "/api/google/disconnect"): "view",
+    # Manual re-sync is per-location as well (Issue #117): read-only against
+    # Google, session-scoped to the caller's authorised location.
+    ("POST", "/api/google/sync"): "view",
     # The callback is reached by Google's top-level redirect and is validated by
     # the single-use `state` (not a session), so it carries no location action.
     ("GET", "/api/google/callback"): None,
@@ -405,6 +408,15 @@ def _locations_status(repo: Any) -> List[Dict[str, Any]]:
         last_error = None
         if last_status == "failed":
             last_error = f"sync_failed (errors={int(run['errors'] or 0)})"
+        # Issue #117: a location persisted by a LIVE sync carries its own
+        # status/time (``source = 'live'``) -- that is what the Locations view
+        # shows for a connected tenant. The run ledger above stays authoritative
+        # when it has a newer entry, so review-sync history is never hidden.
+        live_status = dict(loc).get("sync_status")
+        live_at = dict(loc).get("last_sync_at")
+        if last_at is None and live_at:
+            last_at = live_at
+            last_status = live_status
         unanswered = unanswered_by.get(lid, 0)
         pending = pending_by.get(lid, 0)
         approved = approved_by.get(lid, 0)
@@ -419,6 +431,8 @@ def _locations_status(repo: Any) -> List[Dict[str, Any]]:
             "last_sync_at": last_at,
             "last_sync_status": last_status,
             "last_error": last_error,
+            "source": dict(loc).get("source") or "fixture",
+            "tenant_id": dict(loc).get("tenant_id"),
             "consecutive_failures": failures,
             "needs_alert": failures >= DEFAULT_ALERT_THRESHOLD,
             "unanswered_reviews": int(unanswered),
@@ -475,16 +489,46 @@ _LOC_PAGE_PARAMS = ("page", "page_size", "q", "state", "sync_status", "sort",
                     "order", "group")
 
 
-def _google_connected() -> bool:
-    """Whether a real Google connection is configured.
+def _google_connected(repo: Any = None) -> bool:
+    """Whether a REAL Google connection is configured / stored.
 
-    Offline/mock builds have no OAuth token and no sync client wired in, so the
-    honest answer is ``False``. An operator who really has connected Google can
-    assert it with ``GBP_GOOGLE_CONNECTED=1``. There is deliberately NO
-    fallback that infers "connected" from the API merely responding -- an
-    unconnected app must never look healthy.
+    Two honest sources, in order:
+
+    * an operator assertion (``GBP_GOOGLE_CONNECTED=1``) -- the fixture/demo
+      path, unchanged;
+    * in LIVE mode, the actual vault state (Issue #117): connected when at least
+      one known tenant holds a usable stored token. This is what fixes the
+      stale header chip -- before this, the chip read only the global env check
+      and stayed "not connected" after a tenant really connected.
+
+    It is never inferred from "the API answered", so an unconnected app can
+    never look healthy. Any failure reading the vault reports ``False``.
     """
-    return os.environ.get("GBP_GOOGLE_CONNECTED") == "1"
+    if os.environ.get("GBP_GOOGLE_CONNECTED") == "1":
+        return True
+    if repo is None:
+        return False
+    try:
+        from gbp.oauth.config import live_enabled
+        if not live_enabled():
+            return False
+        from gbp.oauth.config import encryption_key, load_config, vault_dir
+        from gbp.oauth.vault import STATE_CONNECTED, TokenVault
+
+        config = load_config()
+        vault = TokenVault(
+            vault_dir(), encryption_key(),
+            client_id=config.client_id, client_secret=config.client_secret)
+        for row in repo.conn.execute(
+                "SELECT DISTINCT location_name FROM business_locations").fetchall():
+            tenant = row["location_name"]
+            if not tenant:
+                continue
+            if vault.connection_state(tenant) == STATE_CONNECTED:
+                return True
+    except Exception:  # noqa: BLE001 - an unreadable vault means "not connected"
+        return False
+    return False
 
 
 def _google_connections(repo: Any) -> Dict[str, Any]:
@@ -1292,12 +1336,18 @@ def make_handler(
                         )
                     if path == "/api/google/disconnect":
                         return self._handle_google_disconnect(body, user)
+                    if path == "/api/google/sync":
+                        return self._handle_google_sync(body, user)
                     return self._send(*self._route_post(path, query, body, user))
 
                 if path == "/api/google/disconnect":
                     return self._send(*_err(
                         403, "forbidden",
                         detail="disconnect requires an authenticated session"))
+                if path == "/api/google/sync":
+                    return self._send(*_err(
+                        403, "forbidden",
+                        detail="sync requires an authenticated session"))
                 self._send(*self._route_post(path, query, body, None))
             except Exception as exc:  # noqa: BLE001
                 self._dispatch_error(exc)
@@ -1433,16 +1483,66 @@ def make_handler(
             code = _first(query, "code") or ""
             state = _first(query, "state") or ""
             try:
-                google_oauth.callback(code=code, state=state)
+                result = google_oauth.callback(code=code, state=state)
             except FlowStateError as exc:
                 return self._send(*_err(400, "oauth_failed", reason=exc.reason))
             except OAuthExchangeError as exc:
                 return self._send(*_err(400, "oauth_failed", reason=exc.reason))
             except LiveNotConfigured as exc:
                 return self._send(*_err(409, "live_not_configured", detail=str(exc)))
+            # Issue #117: PERSIST the bundle the sync just returned (the Inc 1c
+            # handler discarded it, so a connected tenant still saw fixtures).
+            # Bookkeeping only -- a persistence failure never invalidates the
+            # token the tenant just granted.
+            try:
+                from gbp.sync.persist import persist_bundle
+
+                persist_bundle(service.repo, result.get("tenant_id"),
+                               result.get("sync"))
+            except Exception:  # noqa: BLE001 - never break a granted connection
+                pass
             # Success: land back on the dashboard's Google area with a
             # non-secret notice (area + flag only -- never a token or code).
             return self._redirect("/?area=google&google=connected")
+
+        def _handle_google_sync(self, body: Dict[str, Any], user: Any) -> None:
+            """POST /api/google/sync -> re-run + persist the caller's sync.
+
+            Session-scoped (the tenant is derived from the authorised location),
+            live-gated and READ-ONLY against Google. Returns the persisted
+            counts and the recorded status; never a token, never a raw body.
+            """
+            from gbp.oauth.config import LiveNotConfigured, live_enabled
+
+            if not live_enabled():
+                return self._send(*_err(
+                    409, "live_not_configured",
+                    detail="live connection is not configured"))
+            _reject_unknown(body, ("location_id",))
+            tenant, err = self._session_tenant(user, body.get("location_id"))
+            if err is not None:
+                return self._send(*err)
+            try:
+                bundle = google_oauth.sync(tenant)
+            except LiveNotConfigured as exc:
+                return self._send(*_err(409, "live_not_configured", detail=str(exc)))
+            from gbp.sync.persist import persist_bundle, safe_reason
+
+            counts = persist_bundle(service.repo, tenant, bundle)
+            payload: Dict[str, Any] = {
+                "ok": True,
+                "tenant_id": tenant,
+                "sync_status": counts["sync_status"],
+                "last_sync_at": counts["last_sync_at"],
+                "accounts": counts["accounts"],
+                "locations": counts["locations"],
+                "removed": counts["removed"],
+            }
+            if str(counts["sync_status"]) != "ok":
+                # Safe reason only: exception class name / API error code.
+                payload["reason"] = safe_reason(bundle.get("reason")
+                                                or counts["sync_status"])
+            return self._send(200, payload)
 
         def _handle_google_disconnect(self, body: Dict[str, Any], user: Any) -> None:
             """POST /api/google/disconnect -> drop the caller's tenant token."""
@@ -1546,7 +1646,7 @@ def make_handler(
                 # explicitly asserts GBP_GOOGLE_CONNECTED=1. It is never
                 # derived from "the API answered", so the pill can never claim
                 # a healthy sync when Google is not connected.
-                payload["google_connected"] = _google_connected()
+                payload["google_connected"] = _google_connected(service.repo)
                 # mock_mode: the server runs with auth=None -> demo/mock data.
                 payload["mock_mode"] = not bool(use_auth)
                 # Business-group summary (Issue #112): per-group location counts

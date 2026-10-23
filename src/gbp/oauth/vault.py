@@ -270,6 +270,32 @@ class TokenVault:
         self._write_record(tid, record)
         return self._public(record)
 
+    def note_outcome(self, tenant: Any, status: str, *,
+                     at: Optional[str] = None, error: Optional[str] = None,
+                     clear_error: bool = False) -> Optional[Dict[str, Any]]:
+        """Record a whole sync outcome (status + time + optional safe reason).
+
+        Issue #117: every sync attempt must leave a trace. ``error`` is a safe
+        reason (exception class / API error code only -- the caller is
+        responsible for reducing it); ``clear_error=True`` forgets a previous
+        failure after a success. Nothing here touches the token material.
+        """
+        try:
+            record = self._read_record(tenant)
+        except VaultError:
+            return None
+        if record is None:
+            return None
+        record["sync_status"] = str(status)
+        record["last_sync_at"] = at or time.strftime(
+            "%Y-%m-%dT%H:%M:%SZ", time.gmtime(self._clock()))
+        if error is not None:
+            record["last_error"] = str(error)
+        elif clear_error:
+            record["last_error"] = None
+        self._write_record(tenant, record)
+        return self._public(record)
+
     def note_sync(self, tenant: Any, status: str,
                   at: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """Record the last sync result (and time) without touching the token."""
