@@ -4,8 +4,8 @@ Deterministic, offline **competitor-gap** analysis for the GMap SEO stream. Give
 one target salon profile and a set of competitor profiles in the *same* fixture
 schema as the #39/#86 audit engine, it reports where the target profile's
 **coverage** lags the profiles it is actually compared with -- services,
-secondary categories, key-field presence, and the distribution of the heuristic
-completeness score across the comparison set.
+secondary categories, key-field presence, photo counts (issue #107), and the
+distribution of the heuristic completeness score across the comparison set.
 
 Implementation: `src/gbp/seo/gap.py` · Tests: `tests/test_seo_gap.py`.
 
@@ -37,6 +37,7 @@ recommendations.
 | **Share** | `competitor_count / len(direct set)` as an integer percentage (Python `round`, half to even); the raw count is always reported next to it |
 | **Gap list** | the items the target does not list, sorted by competitor share descending, then name ascending |
 | **Benchmarks** | target score vs the direct-set `median` / `min` / `max`, always labelled `heuristic completeness` |
+| **Photo benchmark** | when the target and at least one direct competitor carry a photo total, target photo count vs the photo **median** of the direct competitors that carry one (`photo_benchmark`, issue #107); a competitor without a photo total is simply excluded from the median, and the report never claims a ranking/visibility outcome |
 | **Field presence** | share of direct competitors carrying each of: website, phone, full-week hours, description >= 250 chars, next to the target's own presence |
 | **Small-N guard** | fewer than `SMALL_N_MINIMUM` (3) direct competitors -> `insufficient-competitor-data` with **no** percentages, **no** coverage tables, **no** benchmarks, **no** field-presence rates and **no** recommendations -- only the resolved set and the reason |
 | **Recommendations** | generated only from the tables above, each quoting its counts, always conditional ("if the salon offers X, consider ..."); the target's offering is never asserted and no ranking/visibility outcome is claimed |
@@ -68,6 +69,7 @@ direct_competitor_count, direct_set      -> the resolved comparison set
 excluded, skipped, notes                 -> everything left out, with reasons
 services, secondary_categories           -> {total_direct, target_count, items, gaps}
 benchmarks                               -> target vs median/min/max (labelled)
+photo_benchmark                          -> target photo count vs competitor median (issue #107)
 field_presence                           -> per-field share + target_present
 recommendations                          -> kind, subject, evidence, conditional text
 ```
@@ -115,6 +117,9 @@ target's resource id, and one non-mapping entry:
   "benchmarks": {"label": "heuristic completeness", "target": 100, "median": 78,
                   "min": 77, "max": 97, "direct_competitors": 3,
                   "target_below_median": false},
+  "photo_benchmark": {"label": "photo count (fixture)", "target": 12, "median": 25,
+                      "min": 20, "max": 30, "direct_competitors_with_photos": 3,
+                      "target_below_median": true},
   "field_presence": [
     {"field": "website", "present_count": 2, "competitor_share": 67, "target_present": true},
     {"field": "phone", "present_count": 3, "competitor_share": 100, "target_present": true},
@@ -130,13 +135,16 @@ target's resource id, and one non-mapping entry:
      "text": "If the salon offers Acrylic Nails, consider adding it to the services list: 1 of 3 direct competitors list it (33%)."},
     {"kind": "secondary_category", "subject": "Nail Art",
      "evidence": "2 of 3 direct competitors carry 'Nail Art' as a secondary category (67%)",
-     "text": "If the salon offers Nail Art, consider adding it as a secondary category: 2 of 3 direct competitors carry it (67%)."}
+     "text": "If the salon offers Nail Art, consider adding it as a secondary category: 2 of 3 direct competitors carry it (67%)."},
+    {"kind": "photos", "subject": "photos",
+     "evidence": "target 12 photos vs direct-set median 25 across 3 direct competitors with photo counts",
+     "text": "If the salon can add photos, consider doing so: the target has 12 photos while the direct-set median is 25 across 3 direct competitors with photo counts. Photo count only -- this is not a position or outcome claim."}
   ]
 }
 ```
 
 (Abridged: the real report lists every service and category union item, the full
-`notes` list, and one recommendation per gap. `to_json()` output is 8 837 bytes
+`notes` list, and one recommendation per gap. `to_json()` output is 9 570 bytes
 for this fixture and byte-identical across runs.)
 
 ## Small-N guard output (2 direct competitors)
@@ -150,6 +158,7 @@ for this fixture and byte-identical across runs.)
   "services": null,
   "secondary_categories": null,
   "benchmarks": null,
+  "photo_benchmark": null,
   "field_presence": [],
   "recommendations": [],
   "excluded": [], "skipped": [], "notes": []
@@ -165,18 +174,19 @@ show *why* the set was too small; nothing statistical is emitted.
 cd /opt/data/gbp-integration && PYTHONPATH=src python3 -m unittest tests.test_seo_gap
 ```
 
-39 tests: coverage both ways (a common service the target lacks; a target-only
+57 tests: coverage both ways (a common service the target lacks; a target-only
 item that is never a gap), share rounding next to the raw count, gap-list
 ordering, category coverage, benchmark median/min/max (odd and even sized sets),
-field-presence rates vs the target, self-exclusion, blank-id handling, primary
-category mismatch, malformed entries and malformed list fields, target without a
-primary category, the small-N guard and its 3-competitor boundary (with an
-explicit "no percentages in the JSON" assertion), score reuse from the audit
-engine, no input mutation, byte-identical output for identical input, direct-set
-permutation invariance, fixture loading/deep copy, wording safety (conditional
-only, evidence counts, no ranking/visibility claim) and an explicit
-**no-network guard** (sockets patched to raise, plus a source scan for network
-imports).
+the photo-count benchmark (issue #107: target vs competitor median, competitors
+without a total excluded, no benchmark when the target has none), field-presence
+rates vs the target, self-exclusion, blank-id handling, primary category
+mismatch, malformed entries and malformed list fields, target without a primary
+category, the small-N guard and its 3-competitor boundary (with an explicit "no
+percentages in the JSON" assertion), score reuse from the audit engine, no input
+mutation, byte-identical output for identical input, direct-set permutation
+invariance, fixture loading/deep copy, wording safety (conditional only,
+evidence counts, no ranking/visibility claim) and an explicit **no-network
+guard** (sockets patched to raise, plus a source scan for network imports).
 
 ## Limits (by design)
 

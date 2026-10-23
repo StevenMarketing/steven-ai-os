@@ -57,6 +57,8 @@ def _profile(**overrides):
         "hours": _hours(),
         "phone": "+1 714-555-0100",
         "website": "https://example.invalid/fixture",
+        # A complete shop carries photos (issue #107); tests override as needed.
+        "photos": {"total": 24, "exterior": 8, "interior": 8, "work": 8},
     }
     base.update(overrides)
     return base
@@ -209,6 +211,92 @@ class BenchmarkTests(unittest.TestCase):
         report = analyze_gap(_target(), _three_direct()[:2])
         self.assertTrue(report.insufficient)
         self.assertIsNone(report.benchmarks)
+
+
+class PhotoBenchmarkTests(unittest.TestCase):
+    """Issue #107: the photo-count benchmark in the gap report."""
+
+    def _competitors(self, totals):
+        return [_competitor(300 + i, photos=total)
+                for i, total in enumerate(totals, start=1)]
+
+    def test_photo_benchmark_reports_target_versus_median(self):
+        report = analyze_gap(_target(photos=8), self._competitors([20, 30, 25]))
+        benchmark = report.photo_benchmark
+        self.assertIsNotNone(benchmark)
+        self.assertEqual(benchmark["label"], gap_mod.PHOTO_BENCHMARK_LABEL)
+        self.assertEqual(benchmark["target"], 8)
+        self.assertEqual(benchmark["median"], 25)
+        self.assertEqual(benchmark["min"], 20)
+        self.assertEqual(benchmark["max"], 30)
+        self.assertEqual(benchmark["direct_competitors_with_photos"], 3)
+        self.assertTrue(benchmark["target_below_median"])
+
+    def test_photo_benchmark_emits_a_conditional_recommendation(self):
+        report = analyze_gap(_target(photos=8), self._competitors([20, 30, 25]))
+        recs = [rec for rec in report.recommendations if rec["kind"] == "photos"]
+        self.assertEqual(len(recs), 1, report.recommendations)
+        self.assertIn("consider", recs[0]["text"])
+        self.assertRegex(recs[0]["evidence"], r"\d+ direct competitor")
+        for phrase in ("guarantee", "rank higher", "visibility improvement"):
+            self.assertNotIn(phrase,
+                             f"{recs[0]['text']} {recs[0]['evidence']}".lower())
+
+    def test_no_recommendation_when_target_is_at_or_above_the_median(self):
+        report = analyze_gap(_target(photos=40), self._competitors([20, 30, 25]))
+        self.assertFalse(report.photo_benchmark["target_below_median"])
+        self.assertEqual(
+            [rec for rec in report.recommendations if rec["kind"] == "photos"],
+            [])
+
+    def test_no_benchmark_when_the_target_has_no_photo_total(self):
+        target = _target()
+        del target["photos"]
+        report = analyze_gap(target, self._competitors([20, 30, 25]))
+        self.assertIsNone(report.photo_benchmark)
+        self.assertEqual(
+            [rec for rec in report.recommendations if rec["kind"] == "photos"],
+            [])
+
+    def test_competitors_without_a_photo_total_are_excluded_from_the_median(self):
+        competitors = self._competitors([20, 30, 25])
+        del competitors[0]["photos"]
+        report = analyze_gap(_target(photos=8), competitors)
+        benchmark = report.photo_benchmark
+        self.assertEqual(benchmark["direct_competitors_with_photos"], 2)
+        self.assertEqual(benchmark["median"], 27.5)   # (25 + 30) / 2
+
+    def test_malformed_photo_totals_never_crash_the_benchmark(self):
+        target = _target(photos="nope")
+        competitors = self._competitors([20, 30, 25])
+        competitors[1]["photos"] = {"total": -4}
+        report = analyze_gap(target, competitors)
+        # target is unusable -> no benchmark at all, and nothing invented.
+        self.assertIsNone(report.photo_benchmark)
+
+    def test_as_dict_extends_additively(self):
+        report = analyze_gap(_target(photos=8), self._competitors([20, 30, 25]))
+        payload = report.as_dict()
+        self.assertIn("photo_benchmark", payload)
+        self.assertEqual(payload["photo_benchmark"], report.photo_benchmark)
+        # every pre-existing top-level key is still present
+        for key in ("status", "target", "direct_set", "services",
+                    "secondary_categories", "benchmarks", "field_presence",
+                    "recommendations"):
+            self.assertIn(key, payload)
+
+    def test_benchmark_is_absent_when_data_is_insufficient(self):
+        report = analyze_gap(_target(photos=8), self._competitors([20, 30])[:2])
+        self.assertTrue(report.insufficient)
+        self.assertIsNone(report.photo_benchmark)
+
+    def test_embedded_fixture_demonstrates_the_benchmark(self):
+        fixture = load_gap_fixture()
+        report = analyze_gap(fixture["target"], fixture["competitors"])
+        self.assertIsNotNone(report.photo_benchmark)
+        self.assertEqual(report.photo_benchmark["target"], 12)
+        self.assertEqual(report.photo_benchmark["median"], 25)
+        self.assertTrue(report.photo_benchmark["target_below_median"])
 
 
 class FieldPresenceTests(unittest.TestCase):

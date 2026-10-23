@@ -28,6 +28,8 @@ no competitor data and makes no ranking claim.
 | Description | `SEO-DESCRIPTION-TOO-SHORT`, `-TOO-LONG`, `-PHONE`, `-URL`, `-ALL-CAPS`, `-KEYWORD-STUFFING` | flags stuffing rather than encouraging it |
 | Description <-> services coherence | `SEO-SERVICES-NOT-IN-DESCRIPTION`, `SEO-DESCRIPTION-SERVICE-NOT-LISTED` | deterministic cross-reference (`low`); quotes the matched terms and never asserts what the business offers |
 | Hours | `SEO-HOURS-DAY-MISSING`, `-MALFORMED`, `-INVALID-RANGE`, `-ALL-CLOSED` | a close of `00:00` is read as `24:00` (see *Midnight close* below) |
+| Photos | `SEO-PHOTOS-NONE`, `SEO-PHOTOS-TOO-FEW`, `SEO-PHOTOS-NO-EXTERIOR`, `-NO-INTERIOR`, `-NO-WORK` | optional `photos` field; not a required field (see *Photos & review health* below) |
+| Review health | `SEO-REVIEWS-LOW-RATING`, `SEO-REVIEWS-TOO-FEW`, `SEO-REVIEWS-UNANSWERED` | optional review fields; each check is silent when its field is absent |
 | Identity (cross-location) | `SEO-IDENTITY-REUSED-NAME`, `SEO-IDENTITY-DUPLICATE-NAME-ZIP` | mirrors the dashboard convention: name + ZIP |
 | Malformed input | `SEO-PROFILE-MALFORMED` | a wrong-typed field is reported, never invented |
 
@@ -58,12 +60,59 @@ stating its basis. Inventory:
 | All-caps guard | `>= 20` letters, `> 50%` upper | Requires enough letters to judge, and treats a strict majority upper-case as "mostly upper case". |
 | Severity weights | `15 / 7 / 3` | Product scoring convention only — Google publishes no profile score; the weights rank findings, they are not a ranking factor. |
 | Phone / URL / time shapes | NANP 3-3-4, `http(s)://`/`www.`, `HH:MM` | Google's content guidelines keep contact details and links out of the description; hours are 24-hour `HH:MM`. |
+| Photo working floor | `_PHOTOS_TOO_FEW_MIN = 10` | Product heuristic: a visual service needs a gallery thick enough to show its range; Google publishes no photo minimum. Below 10 the listing gets `SEO-PHOTOS-TOO-FEW` (`low`). |
+| Rating floor | `_RATING_MIN = 4.0` | Product heuristic: 4.0 is the conventional "customers are broadly happy" line; below it the ratings themselves are surfaced as `SEO-REVIEWS-LOW-RATING` (`medium`). |
+| Review-count floor | `_REVIEW_COUNT_MIN = 20` | Product heuristic: a minimum review base for social proof; below it the listing gets `SEO-REVIEWS-TOO-FEW` (`low`). |
+| Unanswered-review split | `_UNANSWERED_MEDIUM_MIN = 10` | Product heuristic: 1–9 unanswered reviews is a `low` backlog; 10 or more is a `medium` signal that replies are neglected. |
 
 The description/services coherence check is offline and deterministic: it folds
 plurals ("manicures" ~ "Manicure") and matches against a small built-in
 `NAIL_SERVICE_VOCABULARY`. It reports only the cross-reference result and quotes
 the matched terms; it never asserts what the business offers and invents no
 service or category.
+
+## Photos & review health (issue #107)
+
+Two optional check groups, both offline and deterministic like the rest of the
+engine. Every finding here scores normally (only the informational codes in
+`_NON_SCORING_CODES` are excluded).
+
+**Photos** — the profile gains an optional `photos` field: either a
+non-negative integer total, or a mapping `{total, exterior, interior, work}` of
+integer counts. `photos` is deliberately **not** in `REQUIRED_FIELDS`, so a
+listing without the key is not flagged as a *missing field* — it gets the
+dedicated photo findings instead.
+
+| Condition | Finding | Severity |
+|---|---|---|
+| `photos` absent or `total == 0` | `SEO-PHOTOS-NONE` | `medium` |
+| `0 < total < 10` | `SEO-PHOTOS-TOO-FEW` | `low` |
+| mapping with `exterior == 0` | `SEO-PHOTOS-NO-EXTERIOR` | `low` |
+| mapping with `interior == 0` | `SEO-PHOTOS-NO-INTERIOR` | `low` |
+| mapping with `work == 0` (`work` = service/result photos) | `SEO-PHOTOS-NO-WORK` | `low` |
+
+A mapping without an explicit `total` derives it from the category counts, and a
+category the fixture omits is never judged. Malformed values (a string, a list,
+a negative or non-numeric count) produce `SEO-PROFILE-MALFORMED` and never
+crash the audit.
+
+**Review health** — three optional fields (`rating`, `review_count`,
+`unanswered_reviews`) that arrive from a separate pipeline, so **absence is not
+a profile defect**: a field that is absent (or explicitly `null`) keeps its check
+silent.
+
+| Condition | Finding | Severity |
+|---|---|---|
+| `rating` present and `< 4.0` | `SEO-REVIEWS-LOW-RATING` | `medium` |
+| `review_count` present and `< 20` | `SEO-REVIEWS-TOO-FEW` | `low` |
+| `unanswered_reviews` present and `1–9` | `SEO-REVIEWS-UNANSWERED` | `low` |
+| `unanswered_reviews` present and `>= 10` | `SEO-REVIEWS-UNANSWERED` | `medium` |
+
+A present-but-malformed review value (non-numeric rating, a non-integer or
+negative count) produces `SEO-PROFILE-MALFORMED`. The engine also exposes a
+public `photo_total(profile)` helper (the tolerant parse used above) so the gap
+analysis benchmarks photo counts from the same rule and the two can never
+disagree.
 
 ## Midnight close (issue #98)
 
@@ -130,16 +179,24 @@ Example (synthetic demo account, trimmed):
   "source": "synthetic-fixture",
   "disclaimer": "Offline audit of synthetic Google Business Profile fixtures. ...",
   "location_count": 2,
-  "total_findings": 13,
+  "total_findings": 14,
   "duplicate_names": {
     "demo nails": ["accounts/1001/locations/loc-001", "accounts/1001/locations/loc-002"]
   },
   "locations": [
     {
       "location_name": "accounts/1001/locations/loc-002",
-      "score": 35,
+      "score": 28,
       "highest_severity": "medium",
       "findings": [
+        {
+          "code": "SEO-PHOTOS-NONE",
+          "severity": "medium",
+          "field": "photos",
+          "message": "The listing has no photos.",
+          "evidence": "photos=<absent>",
+          "recommendation": "Add real photos of the shop -- exterior, interior and your work ..."
+        },
         {
           "code": "SEO-DESCRIPTION-TOO-SHORT",
           "severity": "medium",
@@ -160,12 +217,12 @@ Example (synthetic demo account, trimmed):
 cd /opt/data/gbp-integration && PYTHONPATH=src python3 -m unittest tests.test_seo_audit
 ```
 
-50 tests: completeness, categories/services, description, hours (including the
-issue #98 midnight-close rule), duplicate name/ZIP, reused-name non-scoring
-behaviour, description <-> services coherence, empty and malformed fixtures,
-deterministic JSON, prioritised actions, deep-copy fixtures, and an explicit
-**no-network guard** (sockets patched to raise and a source scan for network
-imports).
+69 tests: completeness, categories/services, description, hours (including the
+issue #98 midnight-close rule), photos and review health (issue #107), duplicate
+name/ZIP, reused-name non-scoring behaviour, description <-> services coherence,
+empty and malformed fixtures, deterministic JSON, prioritised actions, deep-copy
+fixtures, and an explicit **no-network guard** (sockets patched to raise and a
+source scan for network imports).
 
 ## Dashboard preview (issue #42)
 
