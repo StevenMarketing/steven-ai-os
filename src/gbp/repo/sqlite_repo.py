@@ -75,25 +75,50 @@ class Repository:
         # existing rows keep NULL and are reported as "Ungrouped" by the
         # projection rather than guessing a group.
         self._ensure_account_columns()
+        self._ensure_location_columns()
         self.conn.commit()
 
     def _ensure_account_columns(self) -> None:
-        """Add ``account_name`` / ``account_type`` to ``google_accounts`` once.
+        """Add the optional ``google_accounts`` columns once (additive).
 
-        Idempotent and non-destructive: a database created before Issue #112
-        gains the two nullable columns in place; an unknown/absent table is left
+        ``account_name`` / ``account_type`` come from Issue #112 (business-group
+        projection); ``tenant_id`` from Issue #117 (live-sync ownership).
+        Idempotent and non-destructive: a database created before those issues
+        gains the nullable columns in place; an unknown/absent table is left
         untouched.
         """
+        self._ensure_columns("google_accounts",
+                             ("account_name", "account_type", "tenant_id"))
+
+    def _ensure_location_columns(self) -> None:
+        """Add the live-sync provenance columns to ``business_locations`` once.
+
+        ``tenant_id`` / ``source`` / ``sync_status`` / ``last_sync_at`` (Issue
+        #117) record which tenant a persisted live location belongs to and how
+        its last sync went. Additive and non-destructive: existing fixture rows
+        keep NULL columns, which the readers treat as "demo seed, no live data".
+        """
+        self._ensure_columns("business_locations",
+                             ("tenant_id", "source", "sync_status",
+                              "last_sync_at"))
+        # The index is created here (not in schema.sql) so a database created
+        # before Issue #117 gains its columns first and then the index.
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_business_locations_tenant_id"
+            " ON business_locations(tenant_id)")
+
+    def _ensure_columns(self, table: str, wanted: Any = ()) -> None:
+        """Add each missing nullable TEXT column to ``table`` (idempotent)."""
         cols = {row[1] for row in self.conn.execute(
-            "PRAGMA table_info(google_accounts)")}
+            "PRAGMA table_info(%s)" % table)}
         if not cols:
-            return
-        if "account_name" not in cols:
+            return  # unknown/absent table: never invent one here
+        for column in wanted:
+            if column in cols:
+                continue
             self.conn.execute(
-                "ALTER TABLE google_accounts ADD COLUMN account_name TEXT")
-        if "account_type" not in cols:
-            self.conn.execute(
-                "ALTER TABLE google_accounts ADD COLUMN account_type TEXT")
+                "ALTER TABLE %s ADD COLUMN %s TEXT" % (table, column))
+            cols.add(column)
 
     def close(self) -> None:
         self.conn.close()
@@ -102,32 +127,48 @@ class Repository:
     # accounts / locations
     # ------------------------------------------------------------------ #
     def upsert_account(self, name: str, account_name: Optional[str] = None,
-                       account_type: Optional[str] = None) -> int:
+                       account_type: Optional[str] = None,
+                       tenant_id: Optional[str] = None) -> int:
         """Insert account ``name`` or return the existing row's id.
 
         ``account_name`` (the display name) and ``account_type`` are optional and
         additive: a call that omits them never erases a previously stored value
         (COALESCE), so the older call sites are unaffected. They feed the
-        business-group projection (Issue #112).
+        business-group projection (Issue #112). ``tenant_id`` (Issue #117)
+        records which tenant wrote the row and is never overwritten by a
+        fixture/demo call that omits it.
         """
-        # Older databases predate the two columns; make sure they exist so a
+        # Older databases predate these columns; make sure they exist so a
         # repository built without ``init_db`` still accepts the metadata.
         self._ensure_account_columns()
         self.conn.execute(
-            "INSERT INTO google_accounts(name, account_name, account_type)"
-            " VALUES (?, ?, ?) "
+            "INSERT INTO google_accounts(name, account_name, account_type, tenant_id)"
+            " VALUES (?, ?, ?, ?) "
             "ON CONFLICT(name) DO UPDATE SET"
             " account_name = COALESCE(excluded.account_name,"
             "                          google_accounts.account_name),"
             " account_type = COALESCE(excluded.account_type,"
-            "                          google_accounts.account_type)",
-            (name, account_name, account_type),
+            "                          google_accounts.account_type),"
+            " tenant_id = COALESCE(excluded.tenant_id,"
+            "                       google_accounts.tenant_id)",
+            (name, account_name, account_type, tenant_id),
         )
         self.conn.commit()
         row = self.conn.execute(
             "SELECT id FROM google_accounts WHERE name = ?", (name,)
         ).fetchone()
         return int(row["id"])
+
+    def account_tenant(self, name: str) -> Optional[str]:
+        """The tenant that owns account ``name`` (``None`` = fixture/unknown)."""
+        cols = {row[1] for row in self.conn.execute(
+            "PRAGMA table_info(google_accounts)")}
+        if "tenant_id" not in cols:
+            return None
+        row = self.conn.execute(
+            "SELECT tenant_id FROM google_accounts WHERE name = ?",
+            (name,)).fetchone()
+        return None if row is None else row["tenant_id"]
 
     def account_metadata(self) -> Dict[int, Dict[str, Any]]:
         """Return ``{account row id: {"name", "account_name", "account_type"}}``.
@@ -161,18 +202,30 @@ class Repository:
         state: Optional[str] = None,
         language: Optional[str] = None,
         postal_code: Optional[str] = None,
+        tenant_id: Optional[str] = None,
+        source: Optional[str] = None,
+        sync_status: Optional[str] = None,
+        last_sync_at: Optional[str] = None,
     ) -> int:
         """Insert or update a business location keyed on ``location_name``.
 
         ``postal_code`` is stored as TEXT so leading zeros survive. It is only
         ever overwritten by a new non-empty value (COALESCE), so a later upsert
         that omits the ZIP never erases a known one.
+
+        ``tenant_id`` / ``source`` / ``sync_status`` / ``last_sync_at`` (Issue
+        #117) tag the row as live-synced data for one tenant. Like the ZIP they
+        only ever move forward: a call that omits them (the fixture seeder)
+        leaves the stored value alone, so re-seeding the demo data can never
+        strip the live provenance off a synced row.
         """
+        self._ensure_location_columns()
         self.conn.execute(
             """
             INSERT INTO business_locations
-                (account_id, location_name, title, city, state, language, postal_code)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+                (account_id, location_name, title, city, state, language,
+                 postal_code, tenant_id, source, sync_status, last_sync_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(location_name) DO UPDATE SET
                 account_id  = excluded.account_id,
                 title       = excluded.title,
@@ -180,10 +233,19 @@ class Repository:
                 state       = excluded.state,
                 language    = excluded.language,
                 postal_code = COALESCE(excluded.postal_code,
-                                       business_locations.postal_code)
+                                       business_locations.postal_code),
+                tenant_id   = COALESCE(excluded.tenant_id,
+                                       business_locations.tenant_id),
+                source      = COALESCE(excluded.source,
+                                       business_locations.source),
+                sync_status = COALESCE(excluded.sync_status,
+                                       business_locations.sync_status),
+                last_sync_at = COALESCE(excluded.last_sync_at,
+                                        business_locations.last_sync_at)
             """,
             (account_id, location_name, title, city, state, language,
-             (str(postal_code).strip() or None) if postal_code is not None else None),
+             (str(postal_code).strip() or None) if postal_code is not None else None,
+             tenant_id, source, sync_status, last_sync_at),
         )
         self.conn.commit()
         row = self.conn.execute(
@@ -191,6 +253,54 @@ class Repository:
             (location_name,),
         ).fetchone()
         return int(row["id"])
+
+    # -- live-sync provenance (Issue #117) -------------------------------- #
+    def location_tenant(self, location_name: str) -> Optional[str]:
+        """The tenant a location row belongs to (``None`` = fixture/unknown)."""
+        cols = {row[1] for row in self.conn.execute(
+            "PRAGMA table_info(business_locations)")}
+        if "tenant_id" not in cols:
+            return None
+        row = self.conn.execute(
+            "SELECT tenant_id FROM business_locations WHERE location_name = ?",
+            (location_name,)).fetchone()
+        return None if row is None else row["tenant_id"]
+
+    def live_location_names(self, tenant: str) -> List[str]:
+        """Every location resource name persisted for ``tenant`` as live data."""
+        cols = {row[1] for row in self.conn.execute(
+            "PRAGMA table_info(business_locations)")}
+        if not {"tenant_id", "source"} <= cols:
+            return []
+        return [str(r["location_name"]) for r in self.conn.execute(
+            "SELECT location_name FROM business_locations"
+            " WHERE tenant_id = ? AND source = 'live'"
+            " ORDER BY location_name", (tenant,)).fetchall()]
+
+    def mark_locations_absent(self, tenant: str, keep: Any,
+                             *, status: str = "removed",
+                             at: Optional[str] = None) -> int:
+        """Flag ``tenant``'s live locations that this sync did NOT return.
+
+        A location removed from Google is marked (``sync_status = 'removed'``)
+        rather than deleted or silently left looking fresh, so the dashboard can
+        tell "gone from Google" apart from "synced ok". Only rows already tagged
+        as this tenant's live data are touched -- the query is scoped by
+        ``tenant_id`` and ``source = 'live'``, so another tenant's rows (and the
+        demo seed) can never be modified.
+        """
+        self._ensure_location_columns()
+        names = [str(n) for n in (keep or ())]
+        sql = ("UPDATE business_locations SET sync_status = ?, last_sync_at = ?"
+               " WHERE tenant_id = ? AND source = 'live'")
+        params: List[Any] = [str(status), at, tenant]
+        if names:
+            sql += " AND location_name NOT IN (%s)" % ",".join(
+                "?" for _ in names)
+            params.extend(names)
+        cur = self.conn.execute(sql, params)
+        self.conn.commit()
+        return int(cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0)
 
     # ------------------------------------------------------------------ #
     # reviews

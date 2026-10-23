@@ -104,7 +104,15 @@
         stateExpired: "Token expired or revoked",
         lastSync: "Last Google sync",
         connectConnectedNotice: "Google is connected. Read-only account and location sync has run for this business.",
-        disconnectNotice: "Google connection removed for this business."
+        disconnectNotice: "Google connection removed for this business.",
+        // Manual re-sync (Issue #117). Live-only, like connect/disconnect.
+        syncNow: "Sync now",
+        syncing: "Syncing…",
+        colSync: "Sync status",
+        syncDone: "Sync finished: {accounts} account(s), {locations} location(s) persisted.",
+        syncRemoved: " {removed} location(s) are no longer on Google and are marked removed.",
+        syncFailed: "Sync finished with errors: {reason}",
+        disconnectConfirm: "Remove the stored Google connection for this business?"
       },
       business: {
         // The Business Dashboard is an OFFLINE fixture preview: nothing here
@@ -2066,6 +2074,7 @@
     table.appendChild(el("thead", {}, [el("tr", {}, [
       el("th", { text: t("google.colName") }),
       el("th", { text: t("google.connected") }),
+      el("th", { text: t("google.colSync") }),
       el("th", { text: t("google.lastSync") }),
       el("th", { text: "" })
     ])]));
@@ -2075,28 +2084,51 @@
       var connected = st === "connected";
       var badge = el("span", { cls: "conn-state conn-" + st,
         text: row.connection_label || googleStateLabel(st) });
-      var action;
+      // Action cell: a connected business can be re-synced on demand
+      // (POST /api/google/sync) or disconnected. Both are live-only.
+      var actions = el("span", { cls: "row-actions-inline" });
       if (connected) {
-        action = el("button", { cls: "btn btn-ghost", text: t("google.disconnect"),
+        var syncBtn = el("button", { cls: "btn btn-ghost", text: t("google.syncNow"),
           attrs: { type: "button" } });
-        action.addEventListener("click", function () { disconnectGoogle(row); });
+        syncBtn.addEventListener("click", function () { syncGoogle(row, syncBtn); });
+        actions.appendChild(syncBtn);
+        var off = el("button", { cls: "btn btn-ghost", text: t("google.disconnect"),
+          attrs: { type: "button" } });
+        off.addEventListener("click", function () { disconnectGoogle(row); });
+        actions.appendChild(off);
       } else {
-        action = el("button", { cls: "btn btn-connect", text: t("google.connect"),
+        var action = el("button", { cls: "btn btn-connect", text: t("google.connect"),
           attrs: { type: "button" } });
         action.addEventListener("click", function () { connectGoogle(row); });
+        actions.appendChild(action);
       }
       body.appendChild(el("tr", {}, [
         el("td", { text: row.business_name || row.location_name || "",
           attrs: { "data-label": t("google.colName") } }),
         el("td", { attrs: { "data-label": t("google.connected") } }, [badge]),
+        el("td", { attrs: { "data-label": t("google.colSync") } },
+          [googleSyncCell(row)]),
         el("td", { text: relTime(row.google_last_sync_at),
           attrs: { "data-label": t("google.lastSync"),
                    title: fullTime(row.google_last_sync_at) } }),
-        el("td", { cls: "row-action" }, [action])
+        el("td", { cls: "row-action" }, [actions])
       ]));
     });
     table.appendChild(body);
     return table;
+  }
+
+  // Sync outcome as recorded by the server (vault meta). The failure reason is
+  // a safe code only (exception class / API error code), never a token or a
+  // provider body -- the server never sends anything else.
+  function googleSyncCell(row) {
+    var status = row.google_sync_status;
+    if (!status) return el("span", { cls: "muted", text: t("state.notTracked") });
+    var text = String(status);
+    if (row.google_last_error) text += " \u00b7 " + String(row.google_last_error);
+    var cls = String(status) === "ok" ? "conn-state conn-connected"
+                                      : "conn-state conn-token_expired";
+    return el("span", { cls: cls, text: text });
   }
 
   function googleRowId(row) {
@@ -2122,6 +2154,34 @@
       }
       renderGoogleLiveConnections();
     }).catch(function (err) { reportError(err); });
+  }
+
+  // "Sync now" (Issue #117): re-runs the read-only sync for THIS business and
+  // persists it server-side. The request is session-scoped and CSRF-guarded by
+  // the shared api() helper; the server derives the tenant from the authorised
+  // location, so no resource name is taken from the page.
+  function syncGoogle(row, button) {
+    var id = googleRowId(row);
+    if (id == null) return;
+    var box = $("google-connections-notice");
+    var label = button ? button.textContent : null;
+    if (button) { button.disabled = true; button.textContent = t("google.syncing"); }
+    api("POST", "/api/google/sync", { location_id: id }).then(function (payload) {
+      var counts = payload || {};
+      var text = t("google.syncDone", {
+        accounts: counts.accounts != null ? counts.accounts : 0,
+        locations: counts.locations != null ? counts.locations : 0
+      });
+      if (counts.removed) text += t("google.syncRemoved", { removed: counts.removed });
+      if (counts.sync_status && String(counts.sync_status) !== "ok") {
+        text += " " + t("google.syncFailed", { reason: counts.reason || counts.sync_status });
+      }
+      if (box) { box.textContent = text; box.hidden = false; }
+      renderGoogleLiveConnections();
+    }).catch(function (err) {
+      reportError(err);
+      if (button) { button.disabled = false; button.textContent = label; }
+    });
   }
 
   // --- SEO Audit (READ-ONLY offline audit preview, issue #42) -------- //

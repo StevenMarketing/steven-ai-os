@@ -158,14 +158,37 @@ class GoogleConnectWiring:
         sync_bundle = self._run_sync(tenant, vault, config)
         return {"tenant_id": tenant, "connection": result, "sync": sync_bundle}
 
+    def sync(self, tenant: Any, *,
+             environ: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Run the read-only sync for ``tenant`` on demand (Issue #117).
+
+        Backs the session-scoped "Sync now" route: it resolves the vault the
+        same way the callback does and returns the SAME bundle shape, so the
+        caller can persist it through :func:`gbp.sync.persist.persist_bundle`.
+        GET-only against Google (see :mod:`gbp.sync.live_sync`).
+        """
+        config = require_config(environ)
+        vault = self._vault(environ, config)
+        return self._run_sync(tenant, vault, config)
+
     def _run_sync(self, tenant: str, vault: Any, config: Any) -> Dict[str, Any]:
         try:
-            return self._sync(tenant, vault, config).sync()
+            bundle = self._sync(tenant, vault, config).sync()
         except Exception as exc:  # noqa: BLE001 - a sync failure must not
             # invalidate a token the tenant just granted; report it honestly
             # and never leak the underlying message (it could echo a URL).
-            return {"tenant_id": tenant, "sync_status": "error",
-                    "reason": type(exc).__name__, "accounts": [], "locations": []}
+            bundle = {"tenant_id": tenant, "sync_status": "error",
+                      "reason": type(exc).__name__, "accounts": [],
+                      "locations": []}
+        # Issue #117: EVERY attempt leaves a trace (status + timestamp, or a
+        # safe reason) -- the connect-time sync used to be silently swallowed.
+        try:
+            from gbp.sync.persist import record_outcome
+
+            record_outcome(vault, tenant, bundle)
+        except Exception:  # noqa: BLE001 - bookkeeping must not break the flow
+            pass
+        return bundle
 
     def disconnect(self, tenant: Any, *,
                    environ: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
