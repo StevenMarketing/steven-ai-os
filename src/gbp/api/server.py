@@ -2029,7 +2029,11 @@ def make_handler(
             # /api/drafts/bulk-approve
             if parts[:2] == ["api", "drafts"] and len(parts) == 3 and parts[2] == "bulk-approve":
                 if use_auth:
-                    _reject_unknown(body, ("ids",))
+                    # The shipped UI (web/app.js) always sends ``actor``; in auth
+                    # mode the actor IS the authenticated session user, so the
+                    # field is accepted but its value is ignored (never honoured).
+                    # Any OTHER unknown field still 400s.
+                    _reject_unknown(body, ("ids", "actor"))
                 ids = body.get("ids") or []
                 if not isinstance(ids, list):
                     return _err(400, "invalid_request", detail="ids must be a list")
@@ -2055,7 +2059,13 @@ def make_handler(
                 if use_auth:
                     if not _valid_id(raw_id):
                         return _err(400, "invalid_request", detail="invalid draft id")
-                    _reject_unknown(body, ("text", "note", "idempotency_key", "expected_version"))
+                    # ``actor`` is always sent by the shipped UI (web/app.js) but
+                    # in auth mode the recorded actor is the authenticated session
+                    # user, never a client-supplied value: accept the field and
+                    # discard it (anti-spoofing preserved; see ``actor`` below).
+                    # Unknown fields OTHER than ``actor`` still 400 as before.
+                    _reject_unknown(body, ("text", "note", "idempotency_key",
+                                           "expected_version", "actor"))
                 draft_id = _as_int(raw_id)
                 if draft_id is None:
                     return _err(400, "invalid_request", detail="draft id must be an int")

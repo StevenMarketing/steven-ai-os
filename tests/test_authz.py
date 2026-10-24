@@ -432,11 +432,14 @@ class AuthHttpTest(AuthHttpTestBase):
             cookie=cookie, csrf=csrf)
         self.assertEqual(status, 400)
         self.assertIn("unknown field", json.dumps(body))
-        # actor spoofing is an unknown field when auth is on
-        status, _h, _b = self._req(
+        # Issue #129: in auth mode the shipped UI always sends `actor`; it is
+        # KNOWN-BUT-IGNORED -- the request is accepted, but the recorded actor
+        # is the SESSION user (a spoofed value has zero effect).
+        status, _h, body = self._req(
             "POST", f"/api/drafts/{self.draft_a}/approve", {"actor": "someone-else"},
             cookie=cookie, csrf=csrf)
-        self.assertEqual(status, 400)
+        self.assertEqual(status, 200)
+        self.assertEqual(body.get("actor"), "admin")
         status, _h, _b = self._req(
             "POST", f"/api/drafts/{self.draft_a}/edit", {"text": "x" * 6000},
             cookie=cookie, csrf=csrf)
