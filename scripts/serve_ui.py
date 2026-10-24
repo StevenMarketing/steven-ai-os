@@ -41,6 +41,7 @@ from gbp.fixtures import (  # noqa: E402
     load_location_groups,
     review_page_files,
 )
+from gbp.oauth.config import live_enabled  # noqa: E402
 from gbp.reply.classify import parse_stars  # noqa: E402
 from gbp.repo import Repository  # noqa: E402
 from gbp.workflow.service import ApprovalService  # noqa: E402
@@ -169,10 +170,20 @@ def build_service(db_path: str, reset: bool = False) -> ApprovalService:
         os.remove(db_path)
     repo = Repository(db_path)
     repo.init_db(SCHEMA_PATH)
-    staged = _seed(repo)
+    # Live mode (GBP_LIVE=1 + the OAuth client configured): this DB is a real
+    # production store, so NEVER resurrect the bundled demo fixtures into it.
+    # The same predicate the rest of the app uses is reused here -- no new env
+    # var, and nothing is keyed off the DB contents. Non-live behaviour is
+    # unchanged: the seed still runs exactly as before.
+    if live_enabled():
+        staged = 0
+        print("demo seed skipped (live mode)")
+    else:
+        staged = _seed(repo)
     loader = BrandLoader.from_file(BRAND_FIXTURE) if os.path.exists(BRAND_FIXTURE) else None
     service = ApprovalService(repo, brand_loader=loader)
-    print(f"seeded {staged} draft(s) into {db_path}")
+    if staged or not live_enabled():
+        print(f"seeded {staged} draft(s) into {db_path}")
     return service
 
 
@@ -213,15 +224,25 @@ def build_auth(repo: Repository, *, password: str, allow_ephemeral: bool = False
     opts into an ephemeral secret for throwaway local use.
     """
     store = UserStore(repo.conn)
+    live = live_enabled()
     if store.get("admin") is None:
-        # The demo admin obeys the real password policy: no weak password can
-        # sneak in through the demo path either.
-        try:
-            validate_password(password, username="admin")
-        except PasswordPolicyError as exc:
-            raise SystemExit(f"weak GBP_DEMO_PASSWORD: {exc}")
-        store.create_user("admin", hash_password(password), ["admin"], [])
-        print("created demo user 'admin' (roles: admin)")
+        if live:
+            # Live mode: never mint a NEW demo admin into a real store. No
+            # user row is created here; provisioning real users is out of this
+            # local tool's scope. Existing users are untouched either way.
+            print("demo admin seeding skipped (live mode)")
+        else:
+            # The demo admin obeys the real password policy: no weak password can
+            # sneak in through the demo path either.
+            try:
+                validate_password(password, username="admin")
+            except PasswordPolicyError as exc:
+                raise SystemExit(f"weak GBP_DEMO_PASSWORD: {exc}")
+            store.create_user("admin", hash_password(password), ["admin"], [])
+            print("created demo user 'admin' (roles: admin)")
+    elif live:
+        # Live mode never mutates an existing user row (no password reset).
+        print("demo user 'admin' already exists (roles: admin)")
     else:
         # An existing admin keeps its password unless GBP_DEMO_PASSWORD was set,
         # in which case the operator clearly wants it rotated.
