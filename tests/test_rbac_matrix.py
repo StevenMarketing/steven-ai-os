@@ -375,12 +375,14 @@ class SessionBeatsClientTest(RbacMatrixBase):
     def test_client_actor_field_cannot_escalate_or_place_a_foreign_action(self):
         _s, cookie, csrf = self._login("reviewer1")
         foreign = self._mk_draft(self.loc_b)
-        # A JSON "actor":"admin" on a foreign draft is refused as an unknown
-        # field (400) -- never honoured -- and the row is untouched.
+        # A JSON "actor":"admin" on a foreign draft is accepted as a known field
+        # (the shipped UI always sends it) but IGNORED -- the session decides --
+        # so the request is refused by AUTHORIZATION (403), never honoured, and
+        # the row is untouched.
         st, _h, _p = self._req(
             "POST", f"/api/drafts/{foreign}/approve", {"actor": "admin"},
             cookie=cookie, csrf=csrf)
-        self.assertIn(st, (400, 403), msg="client actor must not be accepted")
+        self.assertEqual(st, 403, msg="client actor must not place a foreign action")
         row = self.repo.conn.execute(
             "SELECT status FROM reply_drafts WHERE id = ?", (foreign,)).fetchone()
         self.assertEqual(row["status"], "needs_review")
