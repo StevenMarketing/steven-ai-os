@@ -37,12 +37,13 @@ from unittest import mock
 _ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.join(_ROOT, "src"))
 
-from gbp.api.server import _google_connected, create_server  # noqa: E402
+from gbp.api.server import _google_connected, _locations_status, create_server  # noqa: E402
 from gbp.auth.token_manager import Token  # noqa: E402
 from gbp.authz import AuthService, UserStore, hash_password  # noqa: E402
 from gbp.client.http_client import MockTransport  # noqa: E402
 from gbp.groups import group_fields  # noqa: E402
 from gbp.oauth.config import LIVE_ENV  # noqa: E402
+from gbp.oauth.flow import connection_rows  # noqa: E402
 from gbp.oauth.vault import STATE_CONNECTED, TOKEN_URL, TokenVault  # noqa: E402
 from gbp.oauth.wiring import GoogleConnectWiring  # noqa: E402
 from gbp.repo import Repository  # noqa: E402
@@ -390,6 +391,65 @@ class HeaderChipTests(unittest.TestCase):
             scopes=["scope/a"]))
         with mock.patch.dict(os.environ, {}, clear=True):
             self.assertFalse(_google_connected(self.repo))
+
+    def test_non_token_sync_error_does_not_mark_the_connection_dead(self):
+        """Issue #121 regression: refresh token + last_error='ApiError' -> live.
+
+        A sync that failed with a NON-token error (an ``ApiError`` recorded via
+        :func:`gbp.sync.persist.record_outcome`) must NOT mark the connection
+        dead: the stored refresh token is still usable, so BOTH the header chip
+        (:func:`_google_connected`) and the connection row report connected.
+        """
+        with mock.patch.dict(os.environ, full_env(self.tmp), clear=True):
+            vault = TokenVault(self.tmp, VAULT_KEY)
+            vault.save(LOC_A, Token(
+                access_token="a", refresh_token="refresh-token-probe",
+                expires_at=1e12, scopes=["scope/a"]))
+            record_outcome(vault, LOC_A, {
+                "tenant_id": LOC_A, "sync_status": "error", "reason": "ApiError",
+            }, now_iso="2026-10-24T03:00:00Z")
+            # Sanity: the non-token reason really was recorded.
+            self.assertEqual(vault.meta(LOC_A)["last_error"], "ApiError")
+
+            # Both signals must agree -- and both must say "connected".
+            self.assertEqual(vault.connection_state(LOC_A), STATE_CONNECTED)
+            self.assertTrue(_google_connected(self.repo))
+
+            rows = connection_rows(_locations_status(self.repo), vault)
+            row = next(r for r in rows if r["location_name"] == LOC_A)
+            self.assertEqual(row["connection_state"], STATE_CONNECTED)
+
+    def test_chip_and_row_agree_when_the_tenant_is_the_resource_name(self):
+        """Issue #121 divergence: the chip must resolve the tenant like the row.
+
+        The Google Connection row resolves a row's tenant as ``location_name``
+        OR ``tenant_id`` OR ``location_id``; the old chip looked at
+        ``location_name`` ONLY. A live location whose ``location_name`` is blank
+        but whose ``tenant_id`` is the Google resource name therefore read
+        "Connected" on the row and "not connected" on the chip. The chip now
+        reads the SAME projection, so the two can never disagree again.
+        """
+        with mock.patch.dict(os.environ, full_env(self.tmp), clear=True):
+            # A live location tagged with the resource name as its tenant, but
+            # with a blank location_name (a real shape for a partially-mapped
+            # row) -- the only handle on its vault record is tenant_id.
+            self.repo.conn.execute(
+                "INSERT INTO business_locations"
+                " (account_id, location_name, title, tenant_id, source)"
+                " VALUES ((SELECT id FROM google_accounts LIMIT 1),"
+                " '', 'Blank Name Salon', ?, 'live')", (LOC_A,))
+            self.repo.conn.commit()
+            vault = TokenVault(self.tmp, VAULT_KEY)
+            vault.save(LOC_A, Token(
+                access_token="a", refresh_token="r", expires_at=1e12,
+                scopes=["scope/a"]))
+            vault.mark_error(LOC_A, "ApiError")
+
+            rows = connection_rows(_locations_status(self.repo), vault)
+            row = next(r for r in rows if r.get("tenant_id") == LOC_A)
+            self.assertEqual(row["connection_state"], STATE_CONNECTED)
+            # The chip must agree with the row.
+            self.assertTrue(_google_connected(self.repo))
 
 
 # ===================================================================== #
