@@ -89,9 +89,15 @@ class UrllibTransport:
         hdrs.update({k: str(v) for k, v in (headers or {}).items()})
         body = None
         if data is not None:
-            body = urllib.parse.urlencode(data).encode("utf-8")
-            hdrs.setdefault("Content-Type",
-                            "application/x-www-form-urlencoded")
+            # A JSON API (the GBP v4 reply write, Issue #126) is told apart by
+            # its Content-Type: encode JSON and keep that header. Anything else
+            # (the OAuth token exchange) keeps the form encoding.
+            if (hdrs.get("Content-Type") or "").lower().startswith("application/json"):
+                body = _json.dumps(data).encode("utf-8")
+            else:
+                body = urllib.parse.urlencode(data).encode("utf-8")
+                hdrs.setdefault("Content-Type",
+                                "application/x-www-form-urlencoded")
 
         request = urllib.request.Request(url, data=body, headers=hdrs,
                                          method=method.upper())
@@ -118,6 +124,23 @@ class UrllibTransport:
         return Response(status=status, payload=payload, headers=resp_headers)
 
     # -- Transport protocol --------------------------------------------- #
+    def send(
+        self,
+        method: str,
+        url: str,
+        params: Optional[Dict[str, Any]] = None,
+        headers: Optional[Dict[str, str]] = None,
+        data: Optional[Dict[str, Any]] = None,
+        timeout: float = 15.0,
+    ) -> Response:
+        """Dispatch ANY method (incl. ``PUT``) with the same guard/contract.
+
+        ``HttpClient`` prefers this so a write keeps its real verb (the reply
+        ``PUT``, Issue #126) instead of being folded into a ``POST``.
+        """
+        return self._send(method, url, params=params, headers=headers,
+                          data=data, timeout=timeout)
+
     def get(
         self,
         url: str,

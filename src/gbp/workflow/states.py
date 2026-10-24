@@ -39,11 +39,19 @@ STATES = (
     "approved",
     "rejected",
     "ready_to_publish",
+    "publish-intent",
     "published",
     "failed",
+    "sent",
 )
 
 #: Allowed transitions, ``src -> {dst, ...}``.
+#:
+#: Issue #126 adds exactly two states and three edges:
+#: ``approved -> publish-intent`` / ``ready_to_publish -> publish-intent``
+#: (only from a state a human already approved) and the terminal
+#: ``publish-intent -> sent``. ``sent`` is reachable ONLY from
+#: ``publish-intent``, so no other state can ever claim a reply was posted.
 ALLOWED: Dict[str, FrozenSet[str]] = {
     "draft": frozenset(
         {"needs_review", "approved", "ready_to_publish", "rejected", "failed"}
@@ -52,10 +60,19 @@ ALLOWED: Dict[str, FrozenSet[str]] = {
         {"approved", "ready_to_publish", "rejected", "draft", "failed"}
     ),
     "rejected": frozenset({"needs_review", "draft", "failed"}),
-    "approved": frozenset({"ready_to_publish", "published", "rejected", "failed"}),
-    "ready_to_publish": frozenset({"published", "approved", "failed"}),
+    "approved": frozenset(
+        {"ready_to_publish", "publish-intent", "published", "rejected", "failed"}
+    ),
+    "ready_to_publish": frozenset(
+        {"publish-intent", "published", "approved", "failed"}
+    ),
+    #: A human approved AND requested publish; the ONLY state a live publish
+    #: may start from, and the only one that may reach ``sent``.
+    "publish-intent": frozenset({"sent"}),
     "published": frozenset(),
     "failed": frozenset({"draft", "needs_review"}),
+    #: Terminal: the reply really was posted to Google.
+    "sent": frozenset(),
 }
 
 
@@ -69,5 +86,9 @@ def assert_transition(src: str, dst: str) -> None:
 
 
 def may_publish(state: str) -> bool:
-    """True only for ``approved`` / ``ready_to_publish``."""
+    """True only for ``approved`` / ``ready_to_publish``.
+
+    Deliberately UNCHANGED by Issue #126: ``publish_guard`` stays the dry-run
+    it always was, so a ``publish-intent`` row is still refused by the guard.
+    """
     return state in ("approved", "ready_to_publish")

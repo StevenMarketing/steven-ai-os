@@ -928,6 +928,7 @@ svg.trend-svg rect { fill: var(--accent-2); opacity: 0.85; }
 .split-detail .actions button:hover:not(:disabled) { border-color: var(--brand-ring); color: var(--brand-ink); }
 .split-detail .actions .approve { border-color: var(--ok); color: var(--ok); background: var(--ok-tint); }
 .split-detail .actions .reject { border-color: var(--danger); color: var(--danger); background: var(--danger-tint); }
+.split-detail .actions .publish { border-color: var(--brand); color: var(--brand-ink); background: var(--brand-tint, var(--ok-tint)); font-weight: 600; }
 .split-detail .actions button:disabled { opacity: 0.5; cursor: not-allowed; }
 .split-detail .editor { margin-top: var(--sp-3); }
 .split-detail .editor textarea {

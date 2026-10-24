@@ -17,6 +17,7 @@ Routes (JSON in / JSON out):
     POST /api/drafts/<id>/approve         -> approve
     POST /api/drafts/<id>/reject          -> reject
     POST /api/drafts/<id>/publish-guard   -> dry-run guard (no side effects)
+    POST /api/drafts/<id>/publish         -> post ONE approved reply (live only)
     POST /api/drafts/bulk-approve         -> bulk_approve
     GET  /api/google/connections          -> per-business connection state (live-gated)
     GET  /api/google/connect?location_id= -> 302 to Google (live-gated; session-scoped)
@@ -248,6 +249,10 @@ RBAC_ROUTE_MATRIX: Dict[Tuple[str, str], Optional[str]] = {
     ("POST", "/api/drafts/<id>/approve"): "approve",
     ("POST", "/api/drafts/<id>/reject"): "reject",
     ("POST", "/api/drafts/<id>/publish-guard"): "view",
+    # Live reply posting (Issue #126): the FIRST Google write. Same RBAC as the
+    # approve endpoint (a human must be allowed to approve), session-scoped and
+    # live-gated. It is a single reply only -- never bulk.
+    ("POST", "/api/drafts/<id>/publish"): "approve",
     ("POST", "/api/drafts/bulk-approve"): "approve",
     # Identity/login routes carry no location and are not location-bearing.
     ("GET", "/api/me"): None,
@@ -1644,6 +1649,60 @@ def make_handler(
             ).fetchone()
             return None if row is None else row["location_id"]
 
+        def _publish_draft(self, draft_id: int, expected: Optional[int],
+                           actor: str, user: Any) -> Tuple[int, Any]:
+            """POST /api/drafts/<id>/publish -> post ONE approved reply (Issue #126).
+
+            Session-scoped and live-gated. The tenant is derived from the draft's
+            OWN location row (already authorised by RBAC above), never from the
+            request body. It records the human's publish request
+            (``approved`` -> ``publish-intent``) and then runs the publish service,
+            whose gates make ZERO Google write calls unless every one passes.
+            The response is safe: no token, no raw Google body -- only ok/draft_id/
+            state and, on refusal, a stable reason.
+            """
+            from gbp.oauth.config import live_enabled
+
+            if not live_enabled():
+                return _err(409, "live_not_configured",
+                            detail="live connection is not configured")
+            if not use_auth:
+                return _err(403, "forbidden",
+                            detail="publish requires an authenticated session")
+            if google_oauth is None:
+                return _err(409, "live_not_configured",
+                            detail="live connection is not configured")
+            loc_row = service.repo.conn.execute(
+                "SELECT tenant_id, source FROM business_locations WHERE id = ?",
+                (self._draft_location(draft_id),)).fetchone()
+            if (loc_row is None or str(loc_row["source"] or "") != "live"
+                    or not loc_row["tenant_id"]):
+                # Not a live location of any tenant -> nothing to publish to.
+                return _err(409, "not_live_location",
+                            detail="the review is not on a live location")
+            tenant = loc_row["tenant_id"]
+            # 1) record the human's publish request (approved -> publish-intent).
+            try:
+                service.request_publish(draft_id, actor, expected_version=expected)
+            except PublishBlocked as exc:
+                return _err(423, "publish_blocked", reason=exc.reason)
+            # 2) publish behind the gates; any refusal performs no PUT.
+            from gbp.replies.publish import PublishService
+
+            publisher = PublishService(service.repo, service)
+            result = publisher.publish(
+                draft_id, actor, tenant=tenant,
+                publisher=lambda review_name, comment: google_oauth.publish_reply(
+                    tenant, review_name, comment))
+            payload: Dict[str, Any] = {
+                "ok": bool(result.get("ok")),
+                "draft_id": draft_id,
+                "state": result.get("state"),
+            }
+            if not result.get("ok"):
+                payload["reason"] = result.get("reason") or "publish_failed"
+            return 200, payload
+
         # ---------------------------------------------------------------- #
         def _route_get(
             self, path: str, query: Dict[str, Any], user: Any = None,
@@ -2008,7 +2067,8 @@ def make_handler(
 
                 if use_auth:
                     need = {"edit": "edit", "approve": "approve",
-                            "reject": "reject", "publish-guard": "view"}.get(action, "view")
+                            "reject": "reject", "publish-guard": "view",
+                            "publish": "approve"}.get(action, "view")
                     loc = self._draft_location(draft_id)
                     if loc is None:
                         return _err(404, "not_found", detail=f"draft not found: {draft_id!r}")
@@ -2044,6 +2104,8 @@ def make_handler(
                     )
                 if action == "publish-guard":
                     return 200, service.publish_guard(draft_id)
+                if action == "publish":
+                    return self._publish_draft(draft_id, expected, actor, user)
                 return _err(404, "not_found", detail=f"no route for POST {path}")
 
             return _err(404, "not_found", detail=f"no route for POST {path}")

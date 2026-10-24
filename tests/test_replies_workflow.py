@@ -72,14 +72,18 @@ class RepliesWorkflowTests(unittest.TestCase):
 
     # -- states ---------------------------------------------------------
     def test_states_module_is_the_expected_machine(self):
-        self.assertEqual(STATES, ("draft", "edited", "approved", "publish-intent"))
+        self.assertEqual(STATES, ("draft", "edited", "approved", "publish-intent",
+                                  "sent"))
         assert_transition("draft", "edited")
         assert_transition("approved", "publish-intent")
+        # Issue #126: the one new edge -- publish-intent -> sent (terminal).
+        assert_transition("publish-intent", "sent")
         with self.assertRaises(InvalidTransition):
             assert_transition("publish-intent", "approved")
         with self.assertRaises(InvalidTransition):
             assert_transition("nonsense", "draft")
-        self.assertEqual(ALLOWED["publish-intent"], frozenset())
+        self.assertEqual(ALLOWED["publish-intent"], frozenset({"sent"}))
+        self.assertEqual(ALLOWED["sent"], frozenset())
 
     # -- draft creation -------------------------------------------------
     def test_create_draft_from_synthetic_review(self):

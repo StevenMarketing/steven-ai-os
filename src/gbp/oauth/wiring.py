@@ -73,6 +73,7 @@ class GoogleConnectWiring:
         api_transport: Any = None,
         sync_factory: Optional[Callable[[Any, Any], Any]] = None,
         reviews_factory: Optional[Callable[[Any, Any, Any], Any]] = None,
+        publisher_factory: Optional[Callable[[Any, Any], Any]] = None,
         vault_factory: Optional[Callable[[Any, Any], Any]] = None,
         clock: Optional[Callable[[], float]] = None,
     ) -> None:
@@ -81,6 +82,7 @@ class GoogleConnectWiring:
         self._api_transport = api_transport
         self._sync_factory = sync_factory
         self._reviews_factory = reviews_factory
+        self._publisher_factory = publisher_factory
         self._vault_factory = vault_factory
         self._clock = clock
         #: state -> tenant id (the tenant is NEVER taken from the callback URL).
@@ -153,6 +155,28 @@ class GoogleConnectWiring:
             client_id=config.client_id, client_secret=config.client_secret)
 
     # -- routes ---------------------------------------------------------- #
+    def _publisher(self, tenant: str, vault: Any, config: Any) -> Any:
+        """Build the LIVE reply publisher (Issue #126) -- the ONE Google write.
+
+        Same construction as :meth:`_reviews`: an ``AuthorizedHttp`` over an
+        ``HttpClient`` whose token provider refreshes through the SAME
+        guard-passing transport the code exchange uses, with the shared pacing
+        bucket. The only difference is the object (``LiveReplyPublisher``) and
+        that it performs a ``PUT`` (the reply) rather than a ``GET``.
+        """
+        if self._publisher_factory is not None:
+            return self._publisher_factory(tenant, vault)
+        from gbp.client.http_client import HttpClient
+        from gbp.replies.publish import LiveReplyPublisher
+
+        refresh_transport = self._transport()
+        http = None
+        if self._api_transport is not None:
+            http = HttpClient(self._api_transport)
+        return LiveReplyPublisher(
+            vault, tenant, http=http, transport=refresh_transport,
+            client_id=config.client_id, client_secret=config.client_secret)
+
     def start(self, tenant: Any, *, environ: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """Begin a connect flow and return the consent URL + state/nonce.
 
@@ -246,6 +270,24 @@ class GoogleConnectWiring:
         except Exception:  # noqa: BLE001 - bookkeeping must not break the flow
             pass
         return summary
+
+    def publish_reply(self, tenant: Any, review_name: str, comment: str, *,
+                      environ: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Post ONE approved reply to Google (Issue #126) -- the first WRITE.
+
+        Built exactly like :meth:`sync_reviews` (``AuthorizedHttp`` + vault +
+        refresh transport + shared pacing) but calls ``GbpClient.update_reply``
+        (``PUT {base}/v4/{review_name}/reply``). It is the ONLY Google write in
+        the system and it is reached only from
+        :class:`gbp.replies.publish.PublishService` after every gate passed.
+
+        Returns Google's own response (the caller persists only safe metadata:
+        a reply ``updateTime``), or raises -- the caller maps a failure to a
+        SAFE reason and never marks the draft sent.
+        """
+        config = require_config(environ)
+        vault = self._vault(environ, config)
+        return self._publisher(tenant, vault, config).publish(review_name, comment)
 
     def _run_sync(self, tenant: str, vault: Any, config: Any) -> Dict[str, Any]:
         try:

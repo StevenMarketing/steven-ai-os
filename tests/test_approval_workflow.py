@@ -137,11 +137,25 @@ class WorkflowTestCase(unittest.TestCase):
 # ====================================================================== #
 class StateMachineTests(unittest.TestCase):
     def test_states_tuple(self):
+        # Issue #126 adds ``publish-intent`` (a human approved AND requested
+        # publish) and the terminal ``sent`` (reachable only from it).
         self.assertEqual(
             set(STATES),
             {"draft", "needs_review", "approved", "rejected",
-             "ready_to_publish", "published", "failed"},
+             "ready_to_publish", "publish-intent", "published", "failed",
+             "sent"},
         )
+
+    def test_sent_is_reachable_only_from_publish_intent(self):
+        assert_transition("approved", "publish-intent")
+        assert_transition("ready_to_publish", "publish-intent")
+        assert_transition("publish-intent", "sent")
+        for src in ("draft", "needs_review", "rejected", "approved",
+                    "ready_to_publish", "published", "failed"):
+            with self.assertRaises(InvalidTransition):
+                assert_transition(src, "sent")
+        with self.assertRaises(InvalidTransition):
+            assert_transition("sent", "publish-intent")
 
     def test_may_publish_only_for_approved_states(self):
         self.assertTrue(may_publish("approved"))
