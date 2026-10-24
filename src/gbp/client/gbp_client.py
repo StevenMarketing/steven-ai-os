@@ -71,7 +71,13 @@ class GbpClient:
     ) -> Any:
         if self.quota is not None:
             self.quota.acquire()
-        return self.http.request(method, url, params=params, data=data)
+        # Issue #126: the GBP v4 reply endpoint (the first WRITE) is a JSON API
+        # -- ``PUT .../reply`` with ``{"comment": ...}``. Advertise JSON so the
+        # transport encodes a write body as JSON instead of form data (which
+        # Google rejects).
+        headers = {"Content-Type": "application/json"} if method != "GET" else None
+        return self.http.request(method, url, params=params, headers=headers,
+                                 data=data)
 
     @staticmethod
     def _account_name(account: Any) -> str:

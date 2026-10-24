@@ -273,13 +273,16 @@ class ReviewInboxApiTestCase(unittest.TestCase):
                                      {"actor": "manager"})
         self.assertEqual(status, 423)
         self.assertEqual(payload["error"], "publish_blocked")
-        # ...and there is no route that publishes anything.
-        status, _payload = self._post(f"/api/drafts/{self.d_low}/publish",
-                                      {"actor": "manager"})
-        self.assertEqual(status, 404)
-        # No draft row is ever 'published'.
+        # Issue #126: a publish ROUTE now exists, but this is the offline/fixture
+        # build -- it refuses honestly (409) rather than pretending to publish.
+        status, payload = self._post(f"/api/drafts/{self.d_low}/publish",
+                                     {"actor": "manager"})
+        self.assertEqual(status, 409)
+        self.assertEqual(payload["error"], "live_not_configured")
+        # No draft row is ever 'published' or 'sent'.
         n = self.repo.conn.execute(
-            "SELECT COUNT(*) AS n FROM reply_drafts WHERE status = 'published'"
+            "SELECT COUNT(*) AS n FROM reply_drafts"
+            " WHERE status IN ('published', 'sent')"
         ).fetchone()["n"]
         self.assertEqual(int(n), 0)
 

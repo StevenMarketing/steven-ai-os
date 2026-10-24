@@ -76,6 +76,64 @@ class Repository:
         # projection rather than guessing a group.
         self._ensure_account_columns()
         self._ensure_location_columns()
+        # Issue #126: the first Google WRITE needs two new reply states
+        # (publish-intent, sent) and an approval text hash. ``sql/schema.sql``
+        # is a protected path, so both arrive here, additively, exactly like
+        # the #117 live columns above.
+        self._ensure_columns("approval_records", ("text_hash",))
+        self._ensure_reply_draft_statuses()
+        self.conn.commit()
+
+    def _ensure_reply_draft_statuses(self) -> None:
+        """Widen ``reply_drafts.status`` to allow ``publish-intent`` / ``sent``.
+
+        A ``CHECK`` constraint cannot be altered in place, so the table is
+        REBUILT only when its current definition does not already permit the two
+        new states: every row (and its ids) is copied to a new table with the
+        widened CHECK, the old table is dropped and the new one renamed, and the
+        index is recreated. Foreign keys are disabled for the swap so the
+        ``approval_records`` children are NOT cascade-deleted. Idempotent and
+        non-destructive: a database already permitting the states is left alone.
+        """
+        row = self.conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table'"
+            " AND name = 'reply_drafts'").fetchone()
+        if row is None or not row[0]:
+            return
+        current = str(row[0])
+        if "publish-intent" in current and "'sent'" in current:
+            return
+        self.conn.execute("PRAGMA foreign_keys = OFF")
+        try:
+            self.conn.executescript(
+                """
+                CREATE TABLE reply_drafts_migrate (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    review_id   INTEGER NOT NULL REFERENCES reviews(id) ON DELETE CASCADE,
+                    draft_text  TEXT,
+                    status      TEXT NOT NULL DEFAULT 'draft'
+                                  CHECK (status IN ('draft','needs_review','approved',
+                                                    'rejected','ready_to_publish',
+                                                    'published','failed',
+                                                    'publish-intent','sent')),
+                    version     INTEGER NOT NULL DEFAULT 1,
+                    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+                    updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+                );
+                INSERT INTO reply_drafts_migrate
+                    (id, review_id, draft_text, status, version, created_at, updated_at)
+                    SELECT id, review_id, draft_text, status, version,
+                           COALESCE(created_at, datetime('now')),
+                           COALESCE(updated_at, datetime('now'))
+                    FROM reply_drafts;
+                DROP TABLE reply_drafts;
+                ALTER TABLE reply_drafts_migrate RENAME TO reply_drafts;
+                CREATE INDEX IF NOT EXISTS idx_reply_drafts_review_id
+                    ON reply_drafts(review_id);
+                """
+            )
+        finally:
+            self.conn.execute("PRAGMA foreign_keys = ON")
         self.conn.commit()
 
     def _ensure_account_columns(self) -> None:
@@ -485,9 +543,11 @@ class Repository:
         row for the same review.
 
         ``published`` is rejected here as well as by the schema CHECK: this
-        module never publishes.
+        module never publishes. (The reply workflow, not this module, is what
+        moves a draft on to ``publish-intent``/``sent`` -- Issue #126.)
         """
-        if status not in ("draft", "needs_review", "approved", "rejected"):
+        if status not in ("draft", "needs_review", "approved", "rejected",
+                          "ready_to_publish", "publish-intent", "sent"):
             raise ValueError(f"invalid draft status: {status!r}")
         if idempotent:
             existing = self.conn.execute(

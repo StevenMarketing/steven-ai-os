@@ -181,6 +181,24 @@ class MockTransport:
         return self
 
     # -- Transport protocol ------------------------------------------------ #
+    def send(
+        self,
+        method: str,
+        url: str,
+        params: Optional[Dict[str, Any]] = None,
+        headers: Optional[Dict[str, str]] = None,
+        data: Optional[Any] = None,
+        timeout: float = 15.0,
+    ) -> Response:
+        """Dispatch ANY method (incl. ``PUT``) and return the raw ``Response``.
+
+        ``HttpClient`` uses this so a write is sent with its real verb instead of
+        being folded into ``post`` (Issue #126's reply ``PUT``). Same
+        single-attempt contract as :meth:`get` / :meth:`post`.
+        """
+        return self._handle(method, url, params=params, headers=headers,
+                            data=data, timeout=timeout)
+
     def get(
         self,
         url: str,
@@ -318,6 +336,13 @@ class HttpClient:
         headers: Optional[Dict[str, str]],
         data: Optional[Any],
     ) -> Response:
+        # Prefer a method-aware ``send`` (so a PUT stays a PUT -- the reply
+        # write, Issue #126); fall back to the GET/POST protocol for a transport
+        # that only implements get/post.
+        send = getattr(self.transport, "send", None)
+        if callable(send):
+            return send(method, url, params=params, headers=headers, data=data,
+                        timeout=self.timeout)
         if method == "GET":
             return self.transport.get(url, params=params, headers=headers, timeout=self.timeout)
         return self.transport.post(url, data=data, headers=headers, timeout=self.timeout)

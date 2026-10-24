@@ -14,6 +14,7 @@ exactly one wins.
 from __future__ import annotations
 
 import datetime as _dt
+import hashlib
 import json
 from typing import Any, Callable, Dict, List, Optional
 
@@ -27,7 +28,25 @@ __all__ = [
     "NotFoundError",
     "ConflictError",
     "PublishBlocked",
+    "text_hash",
 ]
+
+
+#: The state a human-approved draft moves to when publish is REQUESTED, and the
+#: state a live publish starts from (Issue #126). Reaching ``sent`` from anywhere
+#: else is impossible -- see :mod:`gbp.workflow.states`.
+PUBLISH_INTENT = "publish-intent"
+
+
+def text_hash(text: Optional[str]) -> str:
+    """A short, stable SHA-256 hash of a draft text (the approval binding).
+
+    Recorded on the ``approval_records`` row at approval time and re-checked
+    against the CURRENT text before a live publish, so an edit after approval
+    can never be published.
+    """
+    return hashlib.sha256((text or "").encode("utf-8")).hexdigest()[:16]
+
 
 
 # --------------------------------------------------------------------------- #
@@ -200,12 +219,13 @@ class ApprovalService:
         audit_action: str,
         note: Optional[str] = None,
         detail: Optional[dict] = None,
+        text_hash: Optional[str] = None,
     ) -> None:
         now = self.clock()
         self.repo.conn.execute(
-            "INSERT INTO approval_records(draft_id, action, actor, decided_at, note)"
-            " VALUES (?, ?, ?, ?, ?)",
-            (draft_id, action, actor, now, note),
+            "INSERT INTO approval_records(draft_id, action, actor, decided_at,"
+            " note, text_hash) VALUES (?, ?, ?, ?, ?, ?)",
+            (draft_id, action, actor, now, note, text_hash),
         )
         self.repo.insert_audit_log(
             action=audit_action,
@@ -501,6 +521,7 @@ class ApprovalService:
             actor,
             "draft_approved",
             detail={"status": target, "version": version, "auto_publish_eligible": eligible},
+            text_hash=text_hash(draft["draft_text"]),
         )
         self.repo.conn.commit()
         result = {
@@ -608,3 +629,57 @@ class ApprovalService:
             "status": state,
             "brand_auto_publish_allowed": True,
         }
+
+    def request_publish(
+        self,
+        draft_id: int,
+        actor: str,
+        *,
+        expected_version: Optional[int] = None,
+        idempotency_key: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Record a human's publish REQUEST: ``approved`` -> ``publish-intent``.
+
+        This is the only edge into ``publish-intent`` and therefore the only way
+        a reply can ever become ``sent`` (Issue #126). It performs NO network
+        call -- the live PUT is done by
+        :class:`gbp.replies.publish.PublishService` afterwards, behind its own
+        gates.
+
+        Idempotent: re-requesting an already ``publish-intent`` draft returns the
+        current state and writes nothing; a ``sent`` draft returns the recorded
+        result. A draft that is NOT human-approved (``approved`` /
+        ``ready_to_publish``) is refused with :class:`PublishBlocked`.
+        """
+        cached = self._idem_get(idempotency_key)
+        if cached is not None:
+            return cached
+
+        draft = self._get_draft(draft_id)
+        state = str(draft["status"])
+        if state == "sent":
+            # Already published: a re-request is a no-op, never a second write.
+            return {"draft_id": draft_id, "status": "sent", "published": True,
+                    "idempotent": True}
+        if state == PUBLISH_INTENT:
+            return {"draft_id": draft_id, "status": PUBLISH_INTENT,
+                    "version": int(draft["version"]), "idempotent": True}
+        if not may_publish(state):
+            raise PublishBlocked(f"state_not_publishable:{state}")
+
+        self._check_version(draft, expected_version)
+        assert_transition(state, PUBLISH_INTENT)
+        version = self._conditional_update(
+            draft_id, draft["version"], status=PUBLISH_INTENT,
+            expected_version=expected_version)
+        self._record(
+            draft_id, "request_publish", actor, "publish_requested",
+            detail={"status": PUBLISH_INTENT, "version": version,
+                    "from": state})
+        self.repo.conn.commit()
+        result = {"draft_id": draft_id, "status": PUBLISH_INTENT,
+                  "version": version, "actor": actor}
+        self._idem_put(idempotency_key, "request_publish", "reply_draft",
+                       draft_id, result)
+        self.repo.conn.commit()
+        return result

@@ -34,19 +34,22 @@ class InvalidTransition(Exception):
 
 
 #: Every state a reply may hold in this workflow.
-STATES = ("draft", "edited", "approved", "publish-intent")
+STATES = ("draft", "edited", "approved", "publish-intent", "sent")
 
 #: Allowed transitions, ``src -> {dst, ...}``.
 #:
 #: ``draft -> approved`` is allowed so a human may approve a freshly generated
 #: draft without forcing an edit first. ``edited -> edited`` allows repeated
 #: edits pre-approval. ``approved -> draft`` is the invalidation edge applied
-#: when the approved text is edited afterwards.
+#: when the approved text is edited afterwards. Issue #126 adds exactly ONE
+#: edge: ``publish-intent -> sent``, the terminal state that records a reply
+#: really was posted to Google (and back, in the DB machine).
 ALLOWED: Dict[str, FrozenSet[str]] = {
     "draft": frozenset({"edited", "approved"}),
     "edited": frozenset({"edited", "approved"}),
     "approved": frozenset({"draft", "publish-intent"}),
-    "publish-intent": frozenset(),
+    "publish-intent": frozenset({"sent"}),
+    "sent": frozenset(),
 }
 
 

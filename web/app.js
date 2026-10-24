@@ -292,6 +292,11 @@
         placeholder: "Select a review to see its details.",
         confirmApprove: "Approve this reply? Nothing is published to Google (DRAFT MODE). Continue?",
         confirmReject: "Reject this reply? Continue?",
+        publish: "Publish to Google",
+        confirmPublish: "Publish this EXACT reply to Google?\n\n“{text}”\n\nThis posts ONE reply for this review. Continue?",
+        publishDone: "Published to Google — draft {id} is now sent.",
+        publishFailed: "Publish refused: {reason}",
+        notLive: "Publishing is available only in live mode (no Google connection is configured).",
         confirmBulk: "Approve {n} selected draft(s)? Low-star / sensitive reviews are skipped. Nothing is published (DRAFT MODE). Continue?"
       },
       audit: {
@@ -451,6 +456,17 @@
   // (auth=None) everything stays exactly as before (free-text box, no CSRF).
   var auth = { enabled: false, username: null, csrf: null,
                permissions: [], isAdmin: false };
+
+  //: Whether the server reports live mode configured (GET /api/google/
+  //: connections -> live === true). The "Publish to Google" control is offered
+  //: only when this is true -- the offline/DRAFT-mode build never posts.
+  var googleLive = false;
+
+  function refreshLiveMode() {
+    api("GET", "/api/google/connections").then(function (payload) {
+      googleLive = !!(payload && payload.live === true);
+    }).catch(function () { googleLive = false; });
+  }
 
   //: Whether the current session may perform ``action`` (view/edit/approve/
   //: reject/admin). Mock mode (no auth) => unrestricted, exactly as before.
@@ -2061,6 +2077,7 @@
     if (note) note.textContent = t("google.connectionsNote");
     api("GET", "/api/google/connections").then(function (payload) {
       var live = !!(payload && payload.live === true);
+      googleLive = live;
       panel.hidden = !live;
       clearNode(wrap);
       if (!live) return;
@@ -2742,6 +2759,21 @@
     actions.appendChild(editBtn);
     actions.appendChild(approveBtn);
     actions.appendChild(rejectBtn);
+    // Issue #126: the ONE Google write. Rendered ONLY for a human-approved
+    // draft (approved / publish-intent) and ONLY when the server reports live
+    // mode -- never in the offline/DRAFT-mode build. Single reply only.
+    var publishBtn = null;
+    if (draftId != null && (d.status === "approved" || d.status === "publish-intent")) {
+      publishBtn = el("button", { cls: "publish", text: t("inbox.publish") });
+      if (!can("approve")) {
+        publishBtn.disabled = true;
+        publishBtn.title = t("state.notPermitted");
+      } else if (!googleLive) {
+        publishBtn.disabled = true;
+        publishBtn.title = t("inbox.notLive");
+      }
+      actions.appendChild(publishBtn);
+    }
     // Hide/disable actions the current user cannot perform (the backend
     // remains authoritative: a hidden button never means the check is gone).
     if (!can("edit")) editBtn.disabled = true;
@@ -2801,6 +2833,26 @@
         refreshQueue();
       }).catch(reportError);
     });
+
+    if (publishBtn) {
+      publishBtn.addEventListener("click", function () {
+        if (draftId == null || !draftText) return;
+        // The confirm ALWAYS shows the EXACT text that will be posted, so a
+        // human acknowledges precisely what goes to Google (Issue #126).
+        if (!window.confirm(t("inbox.confirmPublish", { text: draftText }))) return;
+        api("POST", "/api/drafts/" + draftId + "/publish", {
+          actor: actor(), expected_version: version
+        }).then(function (res) {
+          if (res && res.ok) {
+            notify(t("inbox.publishDone", { id: draftId }), "");
+          } else {
+            notify(t("inbox.publishFailed",
+              { reason: (res && res.reason) || "publish_failed" }), "warn");
+          }
+          refreshQueue();
+        }).catch(reportError);
+      });
+    }
 
     // Audit history (recent first).
     wrap.appendChild(el("div", { cls: "label", text: t("inbox.audit") }));
@@ -2923,6 +2975,7 @@
     applyLocalizedShell();
     bindShell();
     readUrl();
+    refreshLiveMode();   // Issue #126: gate the Publish control on live mode
 
     navItems().forEach(function (item) {
       item.addEventListener("click", function () {
