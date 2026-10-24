@@ -273,20 +273,37 @@ class ReviewSync:
         }
 
     # -- public API -------------------------------------------------------- #
-    def sync_location(self, location: str, run_key: Optional[str] = None) -> Dict[str, Any]:
+    def sync_location(
+        self,
+        location: str,
+        run_key: Optional[str] = None,
+        *,
+        location_row_id: Optional[int] = None,
+    ) -> Dict[str, Any]:
         """Full sync of one location; walks every page and upserts each review.
 
         Every terminal outcome (ok / partial / failed) is recorded EXACTLY ONCE
         in both ledgers -- including a failure that happens before the walk even
         starts -- so the Dashboard's consecutive-failure streak stays truthful.
+
+        ``location_row_id`` (Issue #123) is an OPTIONAL pre-resolved target: when
+        a live caller already knows which ``business_locations`` row the reviews
+        belong to, supplying its id makes the reviews upsert against THAT row and
+        skips :meth:`_ensure_location` entirely -- so a full v4 name is never
+        upserted as a second, bare location row. Omitting it keeps the offline
+        by-name behaviour byte-for-byte.
         """
         started_at = self._now()
         key = run_key or self._default_run_key(location, started_at)
-        try:
-            _account_id, location_id = self._ensure_location(location)
-        except Exception:
-            self._record_run(location, key, started_at, 0, 0, 1, "failed")
-            raise
+        if location_row_id is not None:
+            # Pre-resolved: the caller owns the row; never create/lookup by name.
+            location_id = int(location_row_id)
+        else:
+            try:
+                _account_id, location_id = self._ensure_location(location)
+            except Exception:
+                self._record_run(location, key, started_at, 0, 0, 1, "failed")
+                raise
 
         fetched = upserted = errors = 0
         status = "ok"

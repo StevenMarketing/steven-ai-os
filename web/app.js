@@ -112,6 +112,11 @@
         syncDone: "Sync finished: {accounts} account(s), {locations} location(s) persisted.",
         syncRemoved: " {removed} location(s) are no longer on Google and are marked removed.",
         syncFailed: "Sync finished with errors: {reason}",
+        // Live review sync (Issue #123). Live-only; reply posting stays OFF.
+        syncReviews: "Sync reviews",
+        syncingReviews: "Syncing reviews…",
+        reviewsSyncDone: "Reviews synced: {locations} location(s), {reviews} review(s) upserted.",
+        reviewsSyncFailed: "Review sync finished with errors: {reason}",
         disconnectConfirm: "Remove the stored Google connection for this business?"
       },
       business: {
@@ -2092,6 +2097,13 @@
           attrs: { type: "button" } });
         syncBtn.addEventListener("click", function () { syncGoogle(row, syncBtn); });
         actions.appendChild(syncBtn);
+        // Live review sync (Issue #123): pulls REAL Google reviews for the
+        // tenant's live locations. Live-only, like Sync now; reply posting
+        // stays OFF.
+        var revBtn = el("button", { cls: "btn btn-ghost", text: t("google.syncReviews"),
+          attrs: { type: "button" } });
+        revBtn.addEventListener("click", function () { syncGoogleReviews(row, revBtn); });
+        actions.appendChild(revBtn);
         var off = el("button", { cls: "btn btn-ghost", text: t("google.disconnect"),
           attrs: { type: "button" } });
         off.addEventListener("click", function () { disconnectGoogle(row); });
@@ -2178,6 +2190,34 @@
       }
       if (box) { box.textContent = text; box.hidden = false; }
       renderGoogleLiveConnections();
+    }).catch(function (err) {
+      reportError(err);
+      if (button) { button.disabled = false; button.textContent = label; }
+    });
+  }
+
+  // "Sync reviews" (Issue #123): pulls REAL Google reviews for every LIVE
+  // location of THIS business and persists them server-side. Session-scoped and
+  // CSRF-guarded by the shared api() helper; the tenant is derived server-side
+  // from the authorised location. Reply posting is NOT triggered here.
+  function syncGoogleReviews(row, button) {
+    var id = googleRowId(row);
+    if (id == null) return;
+    var box = $("google-connections-notice");
+    var label = button ? button.textContent : null;
+    if (button) { button.disabled = true; button.textContent = t("google.syncingReviews"); }
+    api("POST", "/api/google/sync-reviews", { location_id: id }).then(function (payload) {
+      var counts = payload || {};
+      var text = t("google.reviewsSyncDone", {
+        locations: counts.locations != null ? counts.locations : 0,
+        reviews: counts.reviews_upserted != null ? counts.reviews_upserted : 0
+      });
+      if (counts.sync_status && String(counts.sync_status) !== "ok") {
+        text += " " + t("google.reviewsSyncFailed",
+          { reason: counts.reason || counts.sync_status });
+      }
+      if (box) { box.textContent = text; box.hidden = false; }
+      if (button) { button.disabled = false; button.textContent = label; }
     }).catch(function (err) {
       reportError(err);
       if (button) { button.disabled = false; button.textContent = label; }
