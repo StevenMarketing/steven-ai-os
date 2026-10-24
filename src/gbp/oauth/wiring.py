@@ -32,6 +32,7 @@ from gbp.oauth.flow import (
     start_connect,
 )
 from gbp.oauth.state import FlowStateError, StateStore
+from gbp.oauth.tenancy import normalize_tenant
 
 __all__ = ["GoogleConnectWiring"]
 
@@ -71,6 +72,7 @@ class GoogleConnectWiring:
         token_transport: Any = None,
         api_transport: Any = None,
         sync_factory: Optional[Callable[[Any, Any], Any]] = None,
+        reviews_factory: Optional[Callable[[Any, Any, Any], Any]] = None,
         vault_factory: Optional[Callable[[Any, Any], Any]] = None,
         clock: Optional[Callable[[], float]] = None,
     ) -> None:
@@ -78,6 +80,7 @@ class GoogleConnectWiring:
         self._token_transport = token_transport
         self._api_transport = api_transport
         self._sync_factory = sync_factory
+        self._reviews_factory = reviews_factory
         self._vault_factory = vault_factory
         self._clock = clock
         #: state -> tenant id (the tenant is NEVER taken from the callback URL).
@@ -125,6 +128,28 @@ class GoogleConnectWiring:
             http = HttpClient(self._api_transport)
         return LiveLocationSync(
             vault, tenant, http=http, transport=refresh_transport,
+            client_id=config.client_id, client_secret=config.client_secret)
+
+    def _reviews(self, tenant: str, vault: Any, repo: Any, config: Any) -> Any:
+        """Build the read-only REVIEW sync engine (Issue #123).
+
+        Same construction as :meth:`_sync`: ``AuthorizedHttp`` over an
+        ``HttpClient`` whose token provider refreshes through the SAME
+        guard-passing transport the code exchange uses, with the shared pacing
+        bucket. The only difference is the engine (``LiveReviewSync``) and that
+        it needs the repository to attach reviews to existing location rows.
+        """
+        if self._reviews_factory is not None:
+            return self._reviews_factory(tenant, vault, repo)
+        from gbp.client.http_client import HttpClient
+        from gbp.sync.live_reviews import LiveReviewSync
+
+        refresh_transport = self._transport()
+        http = None
+        if self._api_transport is not None:
+            http = HttpClient(self._api_transport)
+        return LiveReviewSync(
+            vault, tenant, repo, http=http, transport=refresh_transport,
             client_id=config.client_id, client_secret=config.client_secret)
 
     # -- routes ---------------------------------------------------------- #
@@ -180,6 +205,47 @@ class GoogleConnectWiring:
         config = require_config(environ)
         vault = self._vault(environ, config)
         return self._run_sync(tenant, vault, config)
+
+    def sync_reviews(self, tenant: Any, repo: Any, targets: Any, *,
+                     environ: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Run the read-only REVIEW sync for ``tenant`` (Issue #123).
+
+        Backs the session-scoped ``POST /api/google/sync-reviews`` route: it
+        builds the reviews engine the same way :meth:`sync` builds the location
+        engine, syncs reviews for every live target sequentially (isolating a
+        per-location failure) and returns the summary. GET-only against Google.
+        The tenant-level outcome is recorded through the existing
+        :func:`gbp.sync.persist.record_outcome` path, so a run always leaves a
+        trace -- status + timestamp, or a safe reason.
+        """
+        config = require_config(environ)
+        vault = self._vault(environ, config)
+        targets = list(targets or [])
+        try:
+            summary = self._reviews(tenant, vault, repo, config).sync_all(targets)
+        except Exception as exc:  # noqa: BLE001 - report honestly, leak nothing
+            from gbp.sync.persist import safe_reason
+
+            summary = {
+                "tenant_id": normalize_tenant(tenant),
+                "locations": len(targets),
+                "reviews_upserted": 0,
+                "errors": 1,
+                "per_location": [],
+                "sync_status": "error",
+                "reason": safe_reason(exc),
+            }
+        try:
+            from gbp.sync.persist import record_outcome
+
+            record_outcome(vault, tenant, {
+                "sync_status": summary.get("sync_status"),
+                "reason": summary.get("reason"),
+                "last_sync": summary.get("last_sync"),
+            })
+        except Exception:  # noqa: BLE001 - bookkeeping must not break the flow
+            pass
+        return summary
 
     def _run_sync(self, tenant: str, vault: Any, config: Any) -> Dict[str, Any]:
         try:

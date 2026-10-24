@@ -277,6 +277,34 @@ class Repository:
             " WHERE tenant_id = ? AND source = 'live'"
             " ORDER BY location_name", (tenant,)).fetchall()]
 
+    def live_locations(self, tenant: str) -> List[Dict[str, Any]]:
+        """Every live location row for ``tenant`` (Issue #123).
+
+        Returns ``{location_row_id, location_name, business_name, account_name}``
+        per row: the pre-resolved row id the review sync must attach reviews to,
+        the stored (short) resource name, its human title and the owning
+        ``google_accounts.name`` used to compose the full v4 resource name.
+        Empty when the database predates the live-sync columns.
+        """
+        cols = {row[1] for row in self.conn.execute(
+            "PRAGMA table_info(business_locations)")}
+        if not {"tenant_id", "source"} <= cols:
+            return []
+        rows = self.conn.execute(
+            "SELECT l.id AS location_row_id, l.location_name, l.title,"
+            " COALESCE(a.name, '') AS account_name"
+            " FROM business_locations l"
+            " LEFT JOIN google_accounts a ON a.id = l.account_id"
+            " WHERE l.tenant_id = ? AND l.source = 'live'"
+            " ORDER BY l.location_name", (tenant,)).fetchall()
+        return [{
+            "location_row_id": int(r["location_row_id"]),
+            "location_name": str(r["location_name"]),
+            "business_name": r["title"],
+            "account_name": str(r["account_name"] or ""),
+        } for r in rows]
+
+
     def mark_locations_absent(self, tenant: str, keep: Any,
                              *, status: str = "removed",
                              at: Optional[str] = None) -> int:

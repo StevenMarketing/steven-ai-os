@@ -22,6 +22,10 @@ Routes (JSON in / JSON out):
     GET  /api/google/connect?location_id= -> 302 to Google (live-gated; session-scoped)
     GET  /api/google/callback?code=&state=-> finish the flow, sync, 302 to the dashboard
     POST /api/google/disconnect           -> drop the caller's tenant token (live-gated)
+    POST /api/google/sync?location_id=    -> read-only re-sync (live-gated; session-scoped)
+    POST /api/google/sync-reviews?location_id=
+                                          -> read-only review sync for the tenant's
+                                             live locations (live-gated; session-scoped)
 
 Authentication (Group 5D/8A -- only active when ``auth`` is supplied):
 
@@ -227,6 +231,9 @@ RBAC_ROUTE_MATRIX: Dict[Tuple[str, str], Optional[str]] = {
     # Manual re-sync is per-location as well (Issue #117): read-only against
     # Google, session-scoped to the caller's authorised location.
     ("POST", "/api/google/sync"): "view",
+    # Live REVIEW sync is per-location as well (Issue #123): GET-only against
+    # Google, session-scoped to the caller's authorised location.
+    ("POST", "/api/google/sync-reviews"): "view",
     # The callback is reached by Google's top-level redirect and is validated by
     # the single-use `state` (not a session), so it carries no location action.
     ("GET", "/api/google/callback"): None,
@@ -1338,6 +1345,8 @@ def make_handler(
                         return self._handle_google_disconnect(body, user)
                     if path == "/api/google/sync":
                         return self._handle_google_sync(body, user)
+                    if path == "/api/google/sync-reviews":
+                        return self._handle_google_sync_reviews(body, user)
                     return self._send(*self._route_post(path, query, body, user))
 
                 if path == "/api/google/disconnect":
@@ -1348,6 +1357,10 @@ def make_handler(
                     return self._send(*_err(
                         403, "forbidden",
                         detail="sync requires an authenticated session"))
+                if path == "/api/google/sync-reviews":
+                    return self._send(*_err(
+                        403, "forbidden",
+                        detail="review sync requires an authenticated session"))
                 self._send(*self._route_post(path, query, body, None))
             except Exception as exc:  # noqa: BLE001
                 self._dispatch_error(exc)
@@ -1542,6 +1555,61 @@ def make_handler(
                 # Safe reason only: exception class name / API error code.
                 payload["reason"] = safe_reason(bundle.get("reason")
                                                 or counts["sync_status"])
+            return self._send(200, payload)
+
+        def _handle_google_sync_reviews(self, body: Dict[str, Any],
+                                        user: Any) -> None:
+            """POST /api/google/sync-reviews -> real reviews for live locations.
+
+            Session-scoped (the tenant is derived from the authorised location),
+            live-gated and READ-ONLY against Google. It syncs reviews for ALL of
+            the tenant's LIVE locations sequentially, isolating a per-location
+            failure, and reports safe counts. Reply posting stays OFF (no write
+            call of any kind is made). Never a token, never a raw body.
+            """
+            from gbp.oauth.config import LiveNotConfigured, live_enabled
+
+            if not live_enabled():
+                return self._send(*_err(
+                    409, "live_not_configured",
+                    detail="live connection is not configured"))
+            _reject_unknown(body, ("location_id",))
+            tenant, err = self._session_tenant(user, body.get("location_id"))
+            if err is not None:
+                return self._send(*err)
+            # Pre-resolve every live location row (id + owning account) so the
+            # full v4 name is composed at the boundary and reviews attach to the
+            # EXISTING row -- never a duplicate, bare location row.
+            targets = service.repo.live_locations(tenant)
+            try:
+                summary = google_oauth.sync_reviews(tenant, service.repo, targets)
+            except LiveNotConfigured as exc:
+                return self._send(*_err(409, "live_not_configured", detail=str(exc)))
+            from gbp.sync.persist import safe_reason
+
+            per_location = []
+            for entry in summary.get("per_location") or []:
+                row: Dict[str, Any] = {
+                    "location_id": entry.get("location_id"),
+                    "business_name": entry.get("business_name"),
+                    "upserted": entry.get("upserted", 0),
+                    "errors": entry.get("errors", 0),
+                }
+                if entry.get("reason"):
+                    row["reason"] = safe_reason(entry["reason"])
+                per_location.append(row)
+            payload: Dict[str, Any] = {
+                "ok": True,
+                "tenant_id": tenant,
+                "locations": int(summary.get("locations") or 0),
+                "reviews_upserted": int(summary.get("reviews_upserted") or 0),
+                "errors": int(summary.get("errors") or 0),
+                "sync_status": summary.get("sync_status") or "ok",
+                "per_location": per_location,
+            }
+            if str(payload["sync_status"]) != "ok":
+                payload["reason"] = safe_reason(
+                    summary.get("reason") or payload["sync_status"])
             return self._send(200, payload)
 
         def _handle_google_disconnect(self, body: Dict[str, Any], user: Any) -> None:
